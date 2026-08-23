@@ -1,0 +1,8 @@
+# Python
+__pycache__/
+*.pyc
+
+# 运行期产物（可由脚本重新生成）
+docs/运行日报.md
+docs/运行数据_节能开.json
+docs/运行数据_节能关.json

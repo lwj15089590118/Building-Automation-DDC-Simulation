@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<!-- ============================================================
+  dashboard/templates/index.html —— Web 监控看板前端
+  技术栈：原生 HTML/CSS/JS + ECharts 5 (CDN 引入，无需本地安装)
+  功能：
+    ① 三房间温度趋势曲线（含 SP±1℃ 死区阴影带）
+    ② 设备状态面板（风机/水泵/阀门状态灯 + 水箱液位柱）
+    ③ 报警列表（实时滚动，按级别着色）
+    ④ 能耗柱状图（节能开/关策略对比 + 实时累计）
+    ⑤ 24h 时间轴回放滑块
+    ⑥ 设定温度(SP)在线修改按钮 / 节能模式开关 / 倍速调节
+  数据来源：轮询后端 /api/state 与 /api/history（Flask 提供）
+============================================================ -->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>楼宇 DDC 控制与能源管理仿真看板（仿真验证）</title>
+<!-- ECharts 官方 CDN；若 jsdelivr 失败自动切换 unpkg 备用源 -->
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<script>window.echarts || document.write('<script src="https://unpkg.com/echarts@5.5.0/dist/echarts.min.js"><\/script>');</script>
+<style>
+  /* ---------------- 全局深色主题 ---------------- */
+  :root{
+    --bg:#0f172a; --card:#1e293b; --line:#334155; --txt:#e2e8f0;
+    --sub:#94a3b8; --ok:#22c55e; --off:#475569; --warn:#f59e0b;
+    --err:#ef4444; --blue:#38bdf8;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--txt);
+       font-family:"Microsoft YaHei","PingFang SC",sans-serif;font-size:14px}
+  .wrap{max-width:1500px;margin:0 auto;padding:12px}
+
+  /* ---------------- 顶栏 ---------------- */
+  header{display:flex;align-items:center;flex-wrap:wrap;gap:10px;
+         padding:10px 16px;background:var(--card);border-radius:10px;margin-bottom:12px}
+  header h1{font-size:18px;margin-right:auto}
+  .badge{padding:3px 10px;border-radius:20px;font-size:12px;border:1px solid var(--line)}
+  .badge.on{color:#052e16;background:var(--ok);border-color:var(--ok)}
+  .badge.off{color:var(--sub)}
+  .badge.warn{color:#450a0a;background:var(--err);border-color:var(--err)}
+  #clock{font-family:Consolas,monospace;font-size:20px;color:var(--blue)}
+  .btn{background:#273449;color:var(--txt);border:1px solid var(--line);
+       border-radius:6px;padding:5px 12px;cursor:pointer;font-size:13px}
+  .btn:hover{border-color:var(--blue)}
+  .btn.active{background:var(--blue);color:#04121f;font-weight:bold}
+
+  /* ---------------- 卡片栅格 ---------------- */
+  .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;
+        padding:12px 14px}
+  .card h2{font-size:15px;color:var(--sub);margin-bottom:8px;font-weight:normal}
+  .c-temp{grid-column:span 8}   .c-status{grid-column:span 4}
+  .c-alarm{grid-column:span 5}  .c-energy{grid-column:span 4}
+  .c-sp{grid-column:span 3}     .c-replay{grid-column:span 12}
+  #tempChart{height:400px;width:100%}
+  #energyChart{height:250px;width:100%}
+
+  /* ---------------- 状态灯 ---------------- */
+  .leds{display:grid;grid-template-columns:1fr 1fr;gap:8px 14px}
+  .led{display:flex;align-items:center;gap:8px;color:var(--sub)}
+  .dot{width:13px;height:13px;border-radius:50%;background:var(--off);
+       box-shadow:none;transition:all .25s}
+  .dot.g{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .dot.r{background:var(--err);box-shadow:0 0 10px var(--err);
+         animation:blink 1s infinite}
+  @keyframes blink{50%{opacity:.35}}
+  .tankbox{display:flex;gap:14px;align-items:center;margin-top:12px}
+  .tank{position:relative;width:46px;height:130px;border:2px solid var(--line);
+        border-radius:8px;overflow:hidden;background:#0b1222}
+  #tankFill{position:absolute;bottom:0;left:0;right:0;background:
+            linear-gradient(180deg,#38bdf8,#0369a1);transition:height .4s}
+  .mark{position:absolute;left:0;right:0;border-top:1px dashed var(--warn);font-size:10px}
+  .kv{font-size:12px;color:var(--sub);line-height:1.7}
+
+  /* ---------------- 报警列表 ---------------- */
+  .alarmlist{max-height:250px;overflow-y:auto;font-size:12.5px}
+  .al-item{padding:6px 8px;border-left:3px solid var(--off);margin-bottom:6px;
+           background:#16203288;border-radius:0 6px 6px 0}
+  .al-item.重要{border-color:var(--err)} .al-item.警告{border-color:var(--warn)}
+  .al-item.提示{border-color:var(--blue)}
+  .al-time{color:var(--sub);margin-right:8px;font-family:Consolas,monospace}
+
+  /* ---------------- SP 控制区 ---------------- */
+  .sp-row{display:flex;align-items:center;justify-content:space-between;
+          padding:8px 4px;border-bottom:1px dashed var(--line)}
+  .sp-name{width:52px}.sp-val{font-family:Consolas,monospace;color:var(--blue)}
+  .sp-btns button{margin-left:4px}
+
+  /* ---------------- 回放滑块 ---------------- */
+  input[type=range]{width:100%;accent-color:var(--blue)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- ===================== 顶栏 ===================== -->
+  <header>
+    <h1>🏢 楼宇 DDC 控制与能源管理仿真看板 <span style="font-size:11px;color:var(--sub)">(仿真验证环境)</span></h1>
+    <span class="badge" id="modeSaving">节能模式</span>
+    <span class="badge" id="modeAuto">时间表自动</span>
+    <span class="badge off" id="stateBadge">系统停止</span>
+    <span id="clock">--:--</span>
+    <button class="btn" data-spd="0">⏸暂停</button>
+    <button class="btn" data-spd="60">60×</button>
+    <button class="btn active" data-spd="300">300×</button>
+    <button class="btn" data-spd="600">600×</button>
+  </header>
+
+  <div class="grid">
+    <!-- ===================== 温度趋势 ===================== -->
+    <div class="card c-temp">
+      <h2>房间温度趋势（阴影带 = 设定值 SP ± 1℃ 死区）</h2>
+      <div id="tempChart"></div>
+    </div>
+
+    <!-- ===================== 设备状态 ===================== -->
+    <div class="card c-status">
+      <h2>设备运行状态</h2>
+      <div class="leds">
+        <div class="led"><span class="dot" id="d-DO1"></span>新风阀</div>
+        <div class="led"><span class="dot" id="d-DO2"></span>送风机</div>
+        <div class="led"><span class="dot" id="d-DO6"></span>排风机</div>
+        <div class="led"><span class="dot" id="d-DO3"></span>冷冻水泵</div>
+        <div class="led"><span class="dot" id="d-DO4"></span>水箱进水阀</div>
+        <div class="led"><span class="dot" id="d-DO5"></span>声光报警器</div>
+        <div class="led"><span class="dot" id="d-DI1"></span>防火阀正常</div>
+        <div class="led"><span class="dot" id="d-DI3"></span>风机无故障</div>
+      </div>
+      <div class="tankbox">
+        <div class="tank">
+          <div id="tankFill" style="height:0%"></div>
+          <!-- 高/低位回差刻度线(满量程 1.95m) -->
+          <div class="mark" style="bottom:92.3%" title="高液位 1.80m"></div>
+          <div class="mark" style="bottom:51.2%" title="低液位 1.00m"></div>
+        </div>
+        <div class="kv">
+          水箱液位：<b id="tankTxt" style="color:var(--blue)">-- m</b><br>
+          进水阀：<b id="tankValve">--</b><br>
+          室外温度：<b id="outTxt">-- ℃</b><br>
+          冷冻水温：<b id="chwsTxt">-- ℃</b><br>
+          风机频率：<b id="hzTxt">-- Hz</b><br>
+          今日累计能耗：<b id="kwhTxt" style="color:var(--warn)">-- kWh</b>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== 报警列表 ===================== -->
+    <div class="card c-alarm">
+      <h2>报警队列（最新在前 | 总计 <span id="alarmCnt">0</span> 次，
+          联锁 <span id="ilCnt">0</span> 次）</h2>
+      <div class="alarmlist" id="alarmList">
+        <div style="color:var(--sub)">暂无报警记录</div>
+      </div>
+    </div>
+
+    <!-- ===================== 能耗对比 ===================== -->
+    <div class="card c-energy">
+      <h2>全天能耗策略对比 (kWh)</h2>
+      <div id="energyChart"></div>
+    </div>
+
+    <!-- ===================== SP 在线修改 ===================== -->
+    <div class="card c-sp">
+      <h2>设定温度在线修改</h2>
+      <div class="sp-row" id="sprow-0"><span class="sp-name">办公室</span>
+        <span class="sp-val" id="spval-0">24.0℃</span>
+        <span class="sp-btns">
+          <button class="btn" onclick="setSp(0,'dec')">−0.5</button>
+          <button class="btn" onclick="setSp(0,'inc')">+0.5</button>
+          <button class="btn" onclick="setSp(0,'auto')">自动</button>
+        </span></div>
+      <div class="sp-row" id="sprow-1"><span class="sp-name">会议室</span>
+        <span class="sp-val" id="spval-1">24.0℃</span>
+        <span class="sp-btns">
+          <button class="btn" onclick="setSp(1,'dec')">−0.5</button>
+          <button class="btn" onclick="setSp(1,'inc')">+0.5</button>
+          <button class="btn" onclick="setSp(1,'auto')">自动</button>
+        </span></div>
+      <div class="sp-row" id="sprow-2"><span class="sp-name">大堂</span>
+        <span class="sp-val" id="spval-2">24.0℃</span>
+        <span class="sp-btns">
+          <button class="btn" onclick="setSp(2,'dec')">−0.5</button>
+          <button class="btn" onclick="setSp(2,'inc')">+0.5</button>
+          <button class="btn" onclick="setSp(2,'auto')">自动</button>
+        </span></div>
+      <div style="margin-top:10px;text-align:center">
+        <button class="btn" id="savingBtn" onclick="toggleMode('energy_saving')">
+          切换节能模式</button>
+        <button class="btn" id="autoBtn" onclick="toggleMode('auto')">
+          切换手/自动</button>
+      </div>
+      <p class="kv" style="margin-top:8px">说明：手动 SP 立即写入 I/O 区并由 DDC
+        下周期生效；点【自动】恢复时间表设定。</p>
+    </div>
+
+    <!-- ===================== 回放滑块 ===================== -->
+    <div class="card c-replay">
+      <h2>时间轴回放（拖动查看历史任意时刻，最长保留 48 小时缓冲）
+          <button class="btn active" id="liveBtn" onclick="backToLive()">返回实时</button>
+          <span id="replayTag" style="color:var(--warn);margin-left:12px"></span></h2>
+      <input type="range" id="replaySlider" min="0" max="100" value="100"
+             oninput="onReplay(this.value)">
+    </div>
+  </div>
+</div>
+
+<script>
+/* ==========================================================
+ * 一、全局状态与图表初始化
+ * ========================================================== */
+const ROOMS = ['办公室','会议室','大堂'];
+const COLORS = ['#38bdf8','#f59e0b','#34d399'];
+let histData = null;          // 最近一次 /api/history 结果
+let replayIdx = null;         // 回放下标(null=实时)
+const tempChart = echarts.init(document.getElementById('tempChart'));
+const energyChart = echarts.init(document.getElementById('energyChart'));
+window.addEventListener('resize',()=>{tempChart.resize();energyChart.resize();});
+
+/* 温度趋势图基础配置：3 条 PV 曲线 + markArea 死区阴影带 */
+function renderTemp(){
+  if(!histData) return;
+  // 回放模式只显示历史起点到回放时刻的数据切片
+  const n = histData.t.length;
+  const end = (replayIdx===null)? n : replayIdx+1;
+  const slice = arr => arr.slice(Math.max(0,end-1440), end);
+  const t   = slice(histData.label);
+  const day = slice(histData.day);
+  const sp0 = slice(histData.sp[0]);
+  const label = t.map((v,i)=>`D${day[i]} ${v}`);
+  // ---- 由 SP 序列生成死区阴影矩形段 ----
+  const areas=[];
+  let s=0;
+  for(let i=1;i<=sp0.length;i++){
+    if(i===sp0.length || Math.abs(sp0[i]-sp0[s])>0.01){
+      if(sp0[s]!==null){
+        areas.push([
+          {xAxis:label[s],yAxis:sp0[s]-1,itemStyle:{color:'rgba(56,189,248,0.08)'}},
+          {xAxis:label[i-1],yAxis:sp0[s]+1}
+        ]);
+      }
+      s=i;
+    }
+  }
+  tempChart.setOption({
+    backgroundColor:'transparent',
+    tooltip:{trigger:'axis',valueFormatter:v=>v==null?'故障':v+' ℃'},
+    legend:{textStyle:{color:'#94a3b8'},top:0},
+    grid:{left:44,right:14,top:30,bottom:52},
+    xAxis:{type:'category',data:label,axisLabel:{color:'#94a3b8',
+      interval:Math.floor(label.length/10),formatter:v=>v.slice(-5)}},
+    yAxis:{type:'value',name:'温度℃',min:v=>Math.floor((v.min-1)),
+      max:v=>Math.ceil((v.max+1)),axisLabel:{color:'#94a3b8'},
+      splitLine:{lineStyle:{color:'#1e293b'}}},
+    series:[
+      ...ROOMS.map((r,i)=>({name:r,type:'line',showSymbol:false,
+        data:slice(histData.pv[i]),lineStyle:{width:1.6,color:COLORS[i]},
+        itemStyle:{color:COLORS[i]},connectNulls:false})),
+      {name:'设定值SP(办公室)',type:'line',showSymbol:false,
+        data:slice(histData.sp[0]),lineStyle:{width:1.4,type:'dashed',
+        color:'#e2e8f0'},itemStyle:{color:'#e2e8f0'},
+        markArea:{silent:true,data:areas}}
+    ]
+  },true);
+}
+
+/* 能耗对比柱状图：run_day 全天结果 + 看板实时累计 */
+function renderEnergy(strategies,live){
+  const cats=[],cool=[],fan=[],pump=[];
+  if(strategies&&strategies.off){
+    cats.push(strategies.off.name||'节能模式关');
+    cool.push(strategies.off.cooling);fan.push(strategies.off.fan);
+    pump.push(strategies.off.pump);
+  }
+  if(strategies&&strategies.on){
+    cats.push(strategies.on.name||'节能模式开');
+    cool.push(strategies.on.cooling);fan.push(strategies.on.fan);
+    pump.push(strategies.on.pump);
+  }
+  cats.push('看板实时累计');cool.push(live.cooling);fan.push(live.fan);pump.push(live.pump);
+  energyChart.setOption({
+    backgroundColor:'transparent',
+    tooltip:{trigger:'axis'},
+    legend:{textStyle:{color:'#94a3b8'},top:0},
+    grid:{left:44,right:10,top:28,bottom:24},
+    xAxis:{type:'category',data:cats,axisLabel:{color:'#94a3b8',fontSize:11}},
+    yAxis:{type:'value',name:'kWh',axisLabel:{color:'#94a3b8'},
+      splitLine:{lineStyle:{color:'#1e293b'}}},
+    series:[
+      {name:'冷量能耗',type:'bar',stack:'e',data:cool,
+       itemStyle:{color:'#38bdf8'},barMaxWidth:46},
+      {name:'风机能耗',type:'bar',stack:'e',data:fan,
+       itemStyle:{color:'#f59e0b'}},
+      {name:'水泵能耗',type:'bar',stack:'e',data:pump,
+       itemStyle:{color:'#34d399'}}
+    ]
+  },true);
+}
+
+/* ==========================================================
+ * 二、数据轮询
+ * ========================================================== */
+async function pollState(){
+  try{
+    const r=await fetch('/api/state');const s=await r.json();
+    // ---- 时钟与徽章 ----
+    document.getElementById('clock').textContent=s.time_str;
+    setBadge('modeSaving',s.mode.energy_saving,'节能模式','夜间停机');
+    setBadge('modeAuto',s.mode.auto,'时间表自动','手动模式');
+    const sb=document.getElementById('stateBadge');
+    sb.textContent=s.state_cn;
+    sb.className='badge '+(s.state==='RUNNING'?'on':'off');
+    // ---- 设备状态灯 ----
+    for(const p of ['DO1','DO2','DO3','DO4','DO6'])
+      document.getElementById('d-'+p).className='dot'+(s.do[p]?' g':'');
+    document.getElementById('d-DO5').className='dot'+(s.do.DO5?' r':'');
+    document.getElementById('d-DI1').className='dot'+(s.di.DI1?' g':' r');
+    document.getElementById('d-DI3').className='dot'+(s.di.DI3?' g':' r');
+    // ---- 水箱与模拟量 ----
+    const pct=Math.max(0,Math.min(100,s.tank_level/1.95*100));
+    document.getElementById('tankFill').style.height=pct+'%';
+    document.getElementById('tankTxt').textContent=s.tank_level==null?'故障':s.tank_level.toFixed(2)+' m';
+    document.getElementById('tankValve').textContent=s.do.DO4?'开':'关';
+    document.getElementById('outTxt').textContent=(s.outdoor??'--')+' ℃';
+    document.getElementById('chwsTxt').textContent=(s.chws_temp??'--')+' ℃';
+    document.getElementById('hzTxt').textContent=s.fan_hz+' Hz';
+    document.getElementById('kwhTxt').textContent=s.energy_today+' kWh';
+    // ---- SP 显示 ----
+    for(let i=0;i<3;i++){
+      document.getElementById('spval-'+i).textContent=
+        s.sp[i].toFixed(1)+'℃'+(s.sp_manual[i]?'(手动)':'');
+      document.getElementById('sprow-'+i).style.borderColor=
+        s.sp_manual[i]?'var(--warn)':'';
+    }
+    // ---- 报警列表 ----
+    document.getElementById('alarmCnt').textContent=s.alarm_count;
+    document.getElementById('ilCnt').textContent=s.interlock_count;
+    const al=document.getElementById('alarmList');
+    al.innerHTML = s.alarms.length? s.alarms.map(a=>
+      `<div class="al-item ${a.level}">
+         <span class="al-time">${a.time}</span>
+         <b>${a.level}</b> [${a.source}] ${a.message}</div>`).join('')
+      : '<div style="color:var(--sub)">暂无报警记录</div>';
+    // 能耗图实时柱
+    fetch('/api/energy').then(r=>r.json()).then(e=>
+      renderEnergy(e.strategies,e.live));
+  }catch(err){console.error('pollState失败',err);}
+}
+
+async function pollHistory(){
+  try{
+    const r=await fetch('/api/history?window=1440');
+    histData=await r.json();
+    const sl=document.getElementById('replaySlider');
+    sl.max=Math.max(0,histData.t.length-1);
+    if(replayIdx!==null) replayIdx=Math.min(replayIdx,+sl.max);
+    renderTemp();
+  }catch(err){console.error('pollHistory失败',err);}
+}
+
+function setBadge(id,on,onText,offText){
+  const b=document.getElementById(id);
+  b.textContent=on?onText:offText;
+  b.className='badge '+(on?'on':'off');
+}
+
+/* ==========================================================
+ * 三、交互：SP修改/模式切换/倍速/回放
+ * ========================================================== */
+async function setSp(room,action){
+  await fetch('/api/sp',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({room,action})});
+  pollState();
+}
+async function toggleMode(key){
+  await fetch('/api/mode',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({key})});
+  pollState();pollHistory();
+}
+document.querySelectorAll('header .btn[data-spd]').forEach(b=>{
+  b.onclick=async()=>{
+    document.querySelectorAll('header .btn[data-spd]').forEach(
+      x=>x.classList.remove('active'));
+    b.classList.add('active');
+    await fetch('/api/speed',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({speed:+b.dataset.spd})});
+  };
+});
+/* 回放：拖动滑块 → 图表截取到该时刻 */
+function onReplay(v){
+  replayIdx=+v;
+  const n=histData?histData.t.length:0;
+  document.getElementById('replayTag').textContent=
+    histData?('回放到: 第'+histData.day[replayIdx]+'天 '+histData.label[replayIdx]):'';
+  document.getElementById('liveBtn').classList.remove('active');
+  renderTemp();
+}
+function backToLive(){
+  replayIdx=null;
+  document.getElementById('replayTag').textContent='';
+  document.getElementById('replaySlider').value=
+    document.getElementById('replaySlider').max;
+  document.getElementById('liveBtn').classList.add('active');
+  renderTemp();
+}
+
+/* 启动轮询：状态 1 秒 / 历史 5 秒 */
+pollState();pollHistory();
+setInterval(pollState,1000);
+setInterval(pollHistory,5000);
+</script>
+</body>
+</html>
