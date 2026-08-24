@@ -50,7 +50,7 @@ python dashboard/app.py
 python -m points.modbus_client_test
 
 :: ④ (可选)独立从站演示模式(不启动看板)
-python -m points.point_table
+python -m points.modbus_slave
 ```
 
 ### 2.3 各模块自检脚本
@@ -68,9 +68,14 @@ python -m energy.analyzer      # 能耗折算数量级验证
 | --- | --- |
 | `plant/thermal.py` | 房间 RC 热网络模型：室外日曲线+人员/设备/日照时间表+盘管冷量+测量噪声与故障注入 |
 | `plant/water_tank.py` | 水箱液位对象：进水阀充水、出水负载扰动、高低液位硬限位 |
-| `points/point_table.py` | BA 点表定义(AI/AO/DI/DO 中文描述)+共享 I/O 映像区 PointBus+Modbus/TCP 从站 |
+| `points/point_defs.py` | BA 点表定义：AI/AO/DI/DO 中文描述、房间名常量、工程值↔寄存器换算 |
+| `points/point_bus.py` | 共享 I/O 映像区 PointBus（线程安全），plant/ddc/dashboard 的数据总线 |
+| `points/modbus_slave.py` | Modbus/TCP 从站：把点表暴露为 IR/HR/DI/CO 四区，含独立演示从站入口 |
 | `points/modbus_client_test.py` | Modbus 主站自测脚本：读 DI/DO/AI、在线写 SP、切模式、遥控线圈、连续轮询 |
-| `ddc/ddc_controller.py` | DDC 核心程序：PID 控温(死区)、液位位式控制(回差)、联锁状态机、时间表 setback、报警队列 |
+| `ddc/pid.py` | PID 控制算法：位置式 + 抗积分饱和 |
+| `ddc/alarms.py` | 报警记录与队列管理：产生(去重)、复位、导出、计数 |
+| `ddc/interlock.py` | 风机链路联锁状态机：新风阀→风机→水泵启动顺序与防火阀安全联锁 |
+| `ddc/ddc_controller.py` | DDC 主程序：时间表 setback、PID 控温(死区)、水箱位式控制(回差)，组合上述模块 |
 | `energy/analyzer.py` | 冷量/风机/水泵能耗积分(kWh)与节能开/关两策略对比、节能率计算 |
 | `run_day.py` | 全天快进仿真(1440min×2 策略)，自动生成 docs/运行日报.md 与 JSON 历史数据 |
 | `dashboard/app.py` | Flask 后端：后台仿真线程+HTTP API+Modbus 从站托管 |
@@ -126,7 +131,7 @@ python -m energy.analyzer      # 能耗折算数量级验证
 ## 6. 常见问题
 
 - **端口冲突**：看板占用 TCP 5000（HTTP）与 5020（Modbus），若被占用请先释放，
-  或在 `dashboard/app.py` 与 `points/point_table.py` 中搜索改端口；
+  或在 `dashboard/app.py` 与 `points/modbus_slave.py` 中搜索改端口；
 - **控制台乱码**：所有入口脚本已做 UTF-8 输出保护；若仍乱码，执行
   `chcp 65001` 后重试；
 - **看板能耗图为空**：先运行一次 `python run_day.py` 生成

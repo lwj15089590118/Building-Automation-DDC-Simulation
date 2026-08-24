@@ -15,7 +15,7 @@ points/modbus_client_test.py —— Modbus/TCP 主站自测脚本
   ⑧ 连续 10 秒轮询 AI1~AI3，展示数据刷新。
 
 【运行前提】二选一：
-  A. python -m points.point_table      （独立演示从站）
+  A. python -m points.modbus_slave     （独立演示从站）
   B. python dashboard/app.py           （看板内置仿真从站）
 本脚本会自动检测端口并给出提示。
 
@@ -59,7 +59,7 @@ def main() -> int:
 
     if not check_port():
         print("\n[错误] 未检测到从站。请先任选其一启动从站：")
-        print("   A. python -m points.point_table     （独立演示从站）")
+        print("   A. python -m points.modbus_slave （独立演示从站）")
         print("   B. python dashboard/app.py          （看板内置仿真从站）")
         return 1
 

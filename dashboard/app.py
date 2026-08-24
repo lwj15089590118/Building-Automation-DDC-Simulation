@@ -37,8 +37,9 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from flask import Flask, jsonify, render_template, request   # noqa: E402
 
-from points.point_table import (PointBus, ModbusSlaveServer,   # noqa: E402
-                                ROOM_NAMES)
+from points.point_bus import PointBus                        # noqa: E402
+from points.modbus_slave import ModbusSlaveServer            # noqa: E402
+from points.point_defs import ROOM_NAMES                     # noqa: E402
 from plant.thermal import BuildingPlant                      # noqa: E402
 from ddc.ddc_controller import DDCController, SimTime         # noqa: E402
 from energy.analyzer import EnergyAnalyzer                   # noqa: E402

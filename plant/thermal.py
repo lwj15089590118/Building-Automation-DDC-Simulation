@@ -41,7 +41,8 @@ import math
 import random
 from dataclasses import dataclass
 
-from points.point_table import PointBus, ROOM_NAMES
+from points.point_bus import PointBus
+from points.point_defs import ROOM_NAMES
 
 
 # ======================================================================

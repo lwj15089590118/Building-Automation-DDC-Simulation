@@ -1,26 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-ddc/ddc_controller.py —— DDC 直接数字控制器程序（项目核心）
-============================================================
+ddc/ddc_controller.py —— DDC 主控制器（策略组合根）
+====================================================
 
 【DDC 是什么】
 Direct Digital Control：控制器按固定扫描周期(本仿真为 1 分钟)循环执行
-"读输入 → 运算 → 写输出"，所有回路/联锁/时间表/报警都在这个周期里完成。
-真实 DDC(如 Honeywell、江森、西门子产品)用图形化编程工具配置，
-本项目用 Python 等价实现同样的扫描逻辑。
+"读输入 → 运算 → 写输出"。真实 DDC(如 Honeywell、江森、西门子产品)
+用图形化编程工具配置，本项目用 Python 等价实现同样的扫描逻辑。
 
-【每个扫描周期完成的任务】
-  ① 读取 AI/DI（经 PointBus，等价于 DDC 采样现场信号）；
-  ② 时间表运算：工作时间 SP=24℃，夜间 setback 至 28℃（节能模式可配）；
-     手动 SP（上位机经 Modbus 下发）优先于时间表；
-  ③ 回路控制：
-     - 空调温度回路 ×3：增量式位置 PID + ±1℃ 死区（带保持区防频繁动作）；
-     - 水箱液位回路 ×1：位式(ON/OFF)控制 + 大回差，防止阀门频繁启停；
-  ④ 联锁顺序控制：风机启动顺序 = 新风阀开 → 延时 → 送风机启动 → (延时)
-     → 冷冻水泵投入；停止顺序相反。防火阀关闭(DI1=0)联锁立即停机并报警；
-  ⑤ 报警处理：高温/低温/传感器故障/联锁动作/水箱溢流/液位过低/风机故障，
-     全部进入报警队列(去重、可恢复)，并联动声光报警器 DO5；
-  ⑥ 写 AO/DO 输出。
+【职责划分】（每个关注点一个模块，本文件只做策略组合与时间表决策）
+  ddc/pid.py        PID 连续调节算法
+  ddc/alarms.py     报警队列管理(去重/复位/导出)
+  ddc/interlock.py  风机链路联锁顺序状态机
+  本文件            时间表(setback/预冷/手动SP)、温度回路死区逻辑、
+                    水箱位式控制、报警触发条件判定、输出写总线
 
 【与真实项目的对应关系】
   PointBus.read("AI1")   ≈ DDC 从端子排采样温度传感器 4-20mA/0-10V 信号
@@ -29,105 +22,17 @@ Direct Digital Control：控制器按固定扫描周期(本仿真为 1 分钟)�
 """
 
 import math
-from dataclasses import dataclass
 
-from points.point_table import PointBus, ROOM_NAMES
-
-
-# ======================================================================
-# 〇、仿真时刻值对象
-# ======================================================================
-
-@dataclass(frozen=True)
-class SimTime:
-    """
-    仿真时刻值对象：第几天 + 当天分钟。
-    绝对分钟数与中文显示串均由此派生，取代在控制器各私有方法间
-    结伴穿透的 (abs_minute, day, mod) 三参数"数据泥团"。
-    """
-    day: int      # 第几天(从 1 开始)
-    minute: int   # 当天第几分钟(0~1439)
-
-    @property
-    def abs_minute(self) -> int:
-        """从仿真 0 时起算的绝对分钟数。"""
-        return (self.day - 1) * 1440 + self.minute
-
-    @property
-    def fmt(self) -> str:
-        """显示串："第X天 HH:MM"。"""
-        return f"第{self.day}天 {self.minute // 60:02d}:{self.minute % 60:02d}"
+from ddc.alarms import AlarmManager
+from ddc.interlock import FanInterlock
+from ddc.pid import PIDController
+from ddc.simtime import SimTime
+from points.point_bus import PointBus
+from points.point_defs import ROOM_NAMES
 
 
 # ======================================================================
-# 一、PID 控制器（位置式算法 + 抗积分饱和）
-# ======================================================================
-
-class PIDController:
-    """
-    制冷工况 PID：
-      偏差 e = PV − SP（PV 越高于设定值，需要越大的阀开度）
-      u(k) = Kp·e + Ki·Σ(e·Δt) + Kd·(e−e_{k−1})/Δt ，输出限幅 [0, 100]%
-    抗积分饱和：输出到达限幅且偏差继续同向时，冻结积分（防止退饱和超调）。
-    """
-
-    def __init__(self, kp: float, ki: float, kd: float,
-                 out_min: float = 0.0, out_max: float = 100.0) -> None:
-        self.kp, self.ki, self.kd = kp, ki, kd
-        self.out_min, self.out_max = out_min, out_max
-        self.integral = 0.0      # 积分累计量 Σ(e·Δt)
-        self.prev_err: float | None = None   # 上一拍偏差(None 表示刚复位)
-        self.output = 0.0        # 当前输出 %
-
-    def reset(self) -> None:
-        """复位（系统重新启动/死区关闭后调用，避免旧积分引起突跳）。"""
-        self.integral = 0.0
-        self.prev_err = None
-        # 注意：output 不清零——死区内要求"保持原开度"
-
-    def update(self, err: float, dt_min: float) -> float:
-        """按当前偏差计算新输出（%）。"""
-        # ---- 比例项 ----
-        p_term = self.kp * err
-        # ---- 微分项（对偏差微分，首拍不微分）----
-        if self.prev_err is None:
-            d_term = 0.0
-        else:
-            d_term = self.kd * (err - self.prev_err) / dt_min
-        self.prev_err = err
-        # ---- 试探性加入积分，检查是否饱和 ----
-        trial_integral = self.integral + self.ki * err * dt_min
-        raw = p_term + trial_integral + d_term
-        if (raw > self.out_max and trial_integral > self.integral) or \
-           (raw < self.out_min and trial_integral < self.integral):
-            pass                      # 饱和且积分还在恶化 → 冻结积分(抗饱和)
-        else:
-            self.integral = trial_integral
-        self.output = max(self.out_min, min(self.out_max,
-                                            p_term + self.integral + d_term))
-        return self.output
-
-
-# ======================================================================
-# 二、报警记录与队列
-# ======================================================================
-
-class AlarmRecord:
-    """一条报警记录（进入报警队列）。"""
-
-    __slots__ = ("abs_minute", "time_str", "level", "source", "message")
-
-    def __init__(self, abs_minute: int, time_str: str,
-                 level: str, source: str, message: str) -> None:
-        self.abs_minute = abs_minute   # 绝对仿真分钟
-        self.time_str = time_str       # "第X天 HH:MM"
-        self.level = level             # "提示" / "警告" / "重要"
-        self.source = source           # 报警来源点位，如 "AI1"
-        self.message = message         # 中文报警描述
-
-
-# ======================================================================
-# 三、DDC 控制器主体
+# DDC 控制器主体
 # ======================================================================
 
 class DDCController:
@@ -135,20 +40,19 @@ class DDCController:
     DDC 控制器：封装全部控制策略，按 scan() 周期运行。
 
     配置参数（构造时可覆盖默认值）：
-      work_start/work_end   工作时间（分钟），SP=work_sp
+      work_start/comfort_start/comfort_end/sys_stop  时间表时刻(分钟)
       setback_sp            夜间节能设定温度 ℃
       deadband              温控死区半宽 ℃（±1℃）
       tank_low/tank_high    水箱位式控制启停液位 m（回差 = high − low）
-      damper_delay/fan_delay/pump_delay 联锁各步延时（分钟）
     """
 
-    # ---------- 联锁状态机状态 ----------
-    ST_STOPPED = "STOPPED"                # 系统停止(全部输出断开)
-    ST_DAMPER_OPENING = "DAMPER_OPENING"  # 新风阀已开、延时中(等风道建立通路)
-    ST_FAN_STARTING = "FAN_STARTING"      # 风机已启动、延时中(确认运行正常)
-    ST_RUNNING = "RUNNING"                # 系统正常运行(水泵投入、允许阀输出)
-    ST_STOPPING = "STOPPING"              # 反序停机第1步：退出冷冻水，风机吹扫
-    ST_DAMPER_CLOSING = "DAMPER_CLOSING"  # 反序停机第2步：风机已停、延时后关新风阀
+    # ---------- 联锁状态常量(委托给 FanInterlock，保持旧引用兼容) ----------
+    ST_STOPPED = FanInterlock.ST_STOPPED
+    ST_DAMPER_OPENING = FanInterlock.ST_DAMPER_OPENING
+    ST_FAN_STARTING = FanInterlock.ST_FAN_STARTING
+    ST_RUNNING = FanInterlock.ST_RUNNING
+    ST_STOPPING = FanInterlock.ST_STOPPING
+    ST_DAMPER_CLOSING = FanInterlock.ST_DAMPER_CLOSING
 
     ROOM_AI = ["AI1", "AI2", "AI3"]
     ROOM_AO = ["AO1", "AO2", "AO3"]
@@ -185,13 +89,12 @@ class DDCController:
         self.tank_low = tank_low
         self.tank_high = tank_high
         self.tank_valve_state = False                  # 进水阀当前指令(False=关)
-        # ---------------- 联锁参数与状态机 ----------------
-        self.damper_delay = damper_delay
-        self.fan_delay = fan_delay
-        self.stop_delay = stop_delay
-        self.state = DDCController.ST_STOPPED
-        self._state_timer = 0                          # 当前状态已持续分钟数
-        self._fire_lockout = False                     # 防火阀联锁锁定(需恢复正常才解锁)
+        # ---------------- 组合子模块 ----------------
+        self._alarms = AlarmManager()                          # 报警队列管理
+        self._ilock = FanInterlock(bus, self._alarms,          # 风机链路联锁
+                                   damper_delay=damper_delay,
+                                   fan_delay=fan_delay,
+                                   stop_delay=stop_delay)
         # ---------------- 温度回路 ----------------
         # PID 参数按热工对象特性整定：开度 1% 稳态温升约 0.4℃(过程增益)，
         # 房间时间常数约 4 小时；积分时间 Ti=Kp/Ki≈20 分钟，保证负荷爬坡时
@@ -202,38 +105,40 @@ class DDCController:
             PIDController(kp=18.0, ki=0.8, kd=18.0),   # 大堂(热容大，稍缓)
         ]
         self.current_sp = [work_sp, work_sp, work_sp]  # 当前生效的设定值(供看板)
-        self.sp_manual_flag = [False, False, False]
         self.sensor_hold = [False, False, False]       # 传感器故障期间保持输出标志
-        # ---------------- 报警 ----------------
+        self._high_timer = [0, 0, 0]                   # 各房间高温持续时间计数
+        # ---------------- 报警阈值 ----------------
         self.high_temp_limit = high_temp_limit
         self.low_temp_limit = low_temp_limit
         self.night_cool_high = night_cool_high
         self.alarm_hyst = alarm_hyst
-        self.alarm_queue: list[AlarmRecord] = []       # 报警队列(只增不减，供看板/日报)
-        self._active_alarms: dict[str, bool] = {}      # 活动报警去重表
-        self._high_timer = [0, 0, 0]                   # 各房间高温持续时间计数
-        # ---------------- 统计 ----------------
-        self.alarm_count = 0                           # 报警发生次数
-        self.interlock_count = 0                       # 联锁动作次数
-        self.startup_count = 0                         # 机组启动次数(完整联锁序列)
 
     # ==================================================
-    # 工具函数
+    # 对外只读访问器（组合子模块的状态与统计）
     # ==================================================
-    def _raise_alarm(self, now: SimTime,
-                     key: str, level: str, source: str, message: str) -> bool:
-        """产生一条报警（同键活动期间去重）。返回是否真正产生了新报警。"""
-        if self._active_alarms.get(key):
-            return False
-        self._active_alarms[key] = True
-        self.alarm_queue.append(
-            AlarmRecord(now.abs_minute, now.fmt, level, source, message))
-        self.alarm_count += 1
-        return True
+    @property
+    def state(self) -> str:
+        """联锁状态机当前状态字符串。"""
+        return self._ilock.state
 
-    def _clear_alarm(self, key: str) -> None:
-        """报警条件消失后清除活动标记（允许下次再报）。"""
-        self._active_alarms[key] = False
+    @property
+    def interlock_count(self) -> int:
+        """联锁动作次数。"""
+        return self._ilock.interlock_count
+
+    @property
+    def startup_count(self) -> int:
+        """机组完整启动次数。"""
+        return self._ilock.startup_count
+
+    @property
+    def alarm_count(self) -> int:
+        """报警发生次数。"""
+        return self._alarms.count
+
+    def recent_alarms(self, limit: int | None = None) -> list[dict]:
+        """导出报警记录（新在前），供看板/日报等外部展示使用。"""
+        return self._alarms.recent(limit)
 
     # ==================================================
     # ② 时间表运算
@@ -304,15 +209,15 @@ class DDCController:
             # ---- 传感器故障检测（NaN 或物理超限）----
             if math.isnan(pv) or pv < -20.0 or pv > 60.0:
                 self.sensor_hold[i] = True
-                self._raise_alarm(now, f"sensor_fault_AI{i+1}",
-                                  "重要", self.ROOM_AI[i],
-                                  f"{ROOM_NAMES[i]}温度传感器故障，"
-                                  f"回路输出保持")
+                self._alarms.trigger(now, f"sensor_fault_AI{i+1}",
+                                     "重要", self.ROOM_AI[i],
+                                     f"{ROOM_NAMES[i]}温度传感器故障，"
+                                     f"回路输出保持")
                 outputs.append(pid.output)          # 安全保持
                 continue
             if self.sensor_hold[i]:                 # 故障恢复
                 self.sensor_hold[i] = False
-                self._clear_alarm(f"sensor_fault_AI{i+1}")
+                self._alarms.clear(f"sensor_fault_AI{i+1}")
                 pid.reset()
 
             # ---- 高温/低温报警（带持续时间去抖与恢复回差）----
@@ -324,22 +229,22 @@ class DDCController:
             if pv > self.high_temp_limit:
                 self._high_timer[i] += 1
                 if self._high_timer[i] >= 5:         # 连续 5 分钟超限才报警
-                    self._raise_alarm(now, key_hi, "警告",
-                                      self.ROOM_AI[i],
-                                      f"{ROOM_NAMES[i]}高温报警:"
-                                      f"PV={pv:.1f}℃>{self.high_temp_limit}℃")
+                    self._alarms.trigger(now, key_hi, "警告",
+                                         self.ROOM_AI[i],
+                                         f"{ROOM_NAMES[i]}高温报警:"
+                                         f"PV={pv:.1f}℃>{self.high_temp_limit}℃")
             elif pv < self.high_temp_limit - self.alarm_hyst:
                 self._high_timer[i] = 0
-                self._clear_alarm(key_hi)
+                self._alarms.clear(key_hi)
 
             key_lo = f"low_temp_room{i}"
             if pv < self.low_temp_limit:
-                self._raise_alarm(now, key_lo, "警告",
-                                  self.ROOM_AI[i],
-                                  f"{ROOM_NAMES[i]}低温报警:"
-                                  f"PV={pv:.1f}℃<{self.low_temp_limit}℃")
+                self._alarms.trigger(now, key_lo, "警告",
+                                     self.ROOM_AI[i],
+                                     f"{ROOM_NAMES[i]}低温报警:"
+                                     f"PV={pv:.1f}℃<{self.low_temp_limit}℃")
             elif pv > self.low_temp_limit + self.alarm_hyst:
-                self._clear_alarm(key_lo)
+                self._alarms.clear(key_lo)
 
             if not cooling_allowed:
                 # 系统未投入(停机/联锁中)：阀全关，复位回路。
@@ -388,108 +293,17 @@ class DDCController:
 
         # ---- 水箱相关报警 ----
         if level >= 1.90:
-            self._raise_alarm(now, "tank_overflow", "重要", "AI5",
-                              f"水箱液位过高({level:.2f}m)，存在溢流风险")
+            self._alarms.trigger(now, "tank_overflow", "重要", "AI5",
+                                 f"水箱液位过高({level:.2f}m)，存在溢流风险")
         elif level <= 1.70:
-            self._clear_alarm("tank_overflow")
+            self._alarms.clear("tank_overflow")
         if level <= 0.20:
-            self._raise_alarm(now, "tank_lowlevel", "警告", "AI5",
-                              f"水箱低液位({level:.2f}m)，请检查供水")
+            self._alarms.trigger(now, "tank_lowlevel", "警告", "AI5",
+                                 f"水箱低液位({level:.2f}m)，请检查供水")
         elif level >= 0.50:
-            self._clear_alarm("tank_lowlevel")
+            self._alarms.clear("tank_lowlevel")
 
         self.bus.write("DO4", 1.0 if self.tank_valve_state else 0.0)
-
-    # ==================================================
-    # ④ 联锁顺序控制（风机启动顺序状态机）
-    # ==================================================
-    def _interlock_sequence(self, run_request: bool, now: SimTime) -> bool:
-        """
-        风机启动联锁状态机。
-        启动顺序：新风阀开 → 延时(damper_delay) → 送/排风机启动 → 延时(fan_delay)
-                   → 冷冻水泵投入(系统进入 RUNNING，允许阀开度输出)
-        停止顺序：关水泵/水阀 → 延时 → 停风机 → 延时 → 关新风阀
-        防火阀联锁(DI1=0)：任何状态下立即停风机/水泵/关阀，并产生重要报警；
-                           恢复前禁止再次启动(锁定，防止反复重启损坏设备)。
-        :return: cooling_allowed —— 是否允许冷冻水阀输出冷量
-        """
-        fire_closed = not self.bus.read_bool("DI1")    # 0 = 防火阀已关闭
-
-        # ---------------- 防火阀联锁（最高优先级）----------------
-        if fire_closed:
-            if self.state != DDCController.ST_STOPPED or not self._fire_lockout:
-                # 立即停一切设备（不经反序停机流程——安全联锁必须瞬时执行）
-                self.state = DDCController.ST_STOPPED
-                self._state_timer = 0
-                self._write_fan_outputs(False, False, False, 0.0)
-                if not self._fire_lockout:
-                    self.interlock_count += 1
-                    self._raise_alarm(now, "fire_interlock",
-                                      "重要", "DI1",
-                                      "防火阀关闭联锁动作：立即停风机/水泵并关闭新风阀")
-                self._fire_lockout = True
-            return False
-
-        # 防火阀恢复正常 → 解除锁定，允许时间表重新启动系统
-        if self._fire_lockout:
-            self._fire_lockout = False
-            self._clear_alarm("fire_interlock")
-
-        # ---------------- 正常启动/停止序列 ----------------
-        if self.state == DDCController.ST_STOPPED:
-            self._write_fan_outputs(False, False, False, 0.0)
-            if run_request:
-                self.state = DDCController.ST_DAMPER_OPENING   # 第一步：开新风阀
-                self._state_timer = 0
-        elif self.state == DDCController.ST_DAMPER_OPENING:
-            # 新风阀已开，风道建立压差需要时间 → 延时后再启动风机(防止风阀未开带载启动)
-            self._write_fan_outputs(True, False, False, 0.0)
-            self._state_timer += 1
-            if self._state_timer >= self.damper_delay:
-                self.state = DDCController.ST_FAN_STARTING
-                self._state_timer = 0
-        elif self.state == DDCController.ST_FAN_STARTING:
-            # 风机已启动，延时确认运行电流正常后再投入冷冻水(防带故障载冷)
-            fan_fault = not self.bus.read_bool("DI3")
-            self._write_fan_outputs(True, True, False, 0.0)
-            if fan_fault:
-                self._raise_alarm(now, "fan_fault",
-                                  "重要", "DI3", "送风机故障反馈，禁止投入冷冻水泵")
-                return False
-            self._state_timer += 1
-            if self._state_timer >= self.fan_delay:
-                self.state = DDCController.ST_RUNNING
-                self._state_timer = 0
-                self.startup_count += 1
-        elif self.state == DDCController.ST_RUNNING:
-            self._write_fan_outputs(True, True, True, 50.0)
-            if not run_request:
-                self.state = DDCController.ST_STOPPING   # 进入反序停机
-                self._state_timer = 0
-        elif self.state == DDCController.ST_STOPPING:
-            # 反序停机第1步：先退冷冻水泵与水阀(防止盘管凝水/存水)，风机继续吹扫
-            self._write_fan_outputs(True, True, False, 0.0)
-            self._state_timer += 1
-            if self._state_timer >= self.stop_delay:
-                self.state = DDCController.ST_DAMPER_CLOSING
-                self._state_timer = 0
-        elif self.state == DDCController.ST_DAMPER_CLOSING:
-            # 反序停机第2步：停风机(排风/送风)，新风阀延时关闭以利用余压吹干风道
-            self._write_fan_outputs(True, False, False, 0.0)
-            self._state_timer += 1
-            if self._state_timer >= self.stop_delay:
-                self._write_fan_outputs(False, False, False, 0.0)
-                self.state = DDCController.ST_STOPPED
-                self._state_timer = 0
-        return self.state == DDCController.ST_RUNNING
-
-    def _write_fan_outputs(self, damper: bool, fan: bool, pump: bool, freq: float) -> None:
-        """一次性写风机链路的全部输出点。"""
-        self.bus.write("DO1", 1.0 if damper else 0.0)   # 新风阀
-        self.bus.write("DO2", 1.0 if fan else 0.0)      # 送风机
-        self.bus.write("DO6", 1.0 if fan else 0.0)      # 排风机(与送风机联动)
-        self.bus.write("DO3", 1.0 if pump else 0.0)     # 冷冻水泵
-        self.bus.write("AO4", freq)                     # 风机频率
 
     # ==================================================
     # 主扫描函数（DDC 每个周期调用一次）
@@ -508,7 +322,7 @@ class DDCController:
         self._control_tank(now)
 
         # ④ 联锁状态机 → 是否允许供冷
-        cooling_allowed = self._interlock_sequence(run_request, now)
+        cooling_allowed = self._ilock.step(now, run_request)
 
         # ③a 三房间 PID 控温（仅 RUNNING 时有冷量输出）
         outputs = self._control_rooms(sp_list, cooling_allowed, now)
@@ -516,30 +330,14 @@ class DDCController:
             self.bus.write(self.ROOM_AO[i], out)
 
         # ⑤ 声光报警器联动：有任何活动报警则 DO5=1
-        any_active = any(self._active_alarms.values())
+        any_active = self._alarms.any_active()
         self.bus.write("DO5", 1.0 if any_active else 0.0)
-
-    # ==================================================
-    # 对外只读访问器（避免外部直穿内部队列结构）
-    # ==================================================
-    def recent_alarms(self, limit: int | None = None) -> list[dict]:
-        """
-        导出报警记录（新在前），供看板/日报等外部展示使用。
-        :param limit: 最多返回条数；None=全部导出。
-        :return: [{time, level, source, message}, ...]
-        """
-        queue = self.alarm_queue[-limit:] if limit else self.alarm_queue
-        return [
-            {"time": a.time_str, "level": a.level,
-             "source": a.source, "message": a.message}
-            for a in queue[::-1]
-        ]
 
 
 if __name__ == "__main__":
     # 最小自测：构造总线，手动模拟一天的关键时刻行为
     from plant.thermal import BuildingPlant
-    from points.point_table import print_point_table
+    from points.point_defs import print_point_table
 
     print_point_table()
     bus = PointBus()
@@ -556,6 +354,6 @@ if __name__ == "__main__":
                   f"AO={[round(bus.read(a),1) for a in ('AO1','AO2','AO3')]} "
                   f"液位={bus.read('AI5'):.2f}")
     print("\n报警队列:")
-    for a in ddc.alarm_queue[:10]:
-        print(f"  [{a.time_str}] {a.level} {a.source} {a.message}")
+    for a in ddc.recent_alarms(10)[::-1]:
+        print(f"  [{a['time']}] {a['level']} {a['source']} {a['message']}")
     print(f"报警总数={ddc.alarm_count} 联锁次数={ddc.interlock_count} 启动次数={ddc.startup_count}")

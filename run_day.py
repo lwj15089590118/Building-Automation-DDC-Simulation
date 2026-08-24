@@ -33,7 +33,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from points.point_table import PointBus, ROOM_NAMES  # noqa: E402
+from points.point_bus import PointBus                # noqa: E402
+from points.point_defs import ROOM_NAMES             # noqa: E402
 from plant.thermal import BuildingPlant          # noqa: E402
 from ddc.ddc_controller import DDCController, SimTime  # noqa: E402
 from energy.analyzer import (EnergyAnalyzer,     # noqa: E402
@@ -49,7 +50,7 @@ SENSOR_FAULT_MIN = 600             # 10:00 注入传感器故障
 SENSOR_FAULT_DUR = 8               # 持续 8 分钟
 FIRE_MIN = 900                     # 15:00 防火阀动作
 FIRE_DUR = 12                      # 持续 12 分钟
-# 房间名称使用 points.point_table.ROOM_NAMES（唯一来源）
+# 房间名称使用 points.point_defs.ROOM_NAMES（唯一来源）
 DOC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs")
 
 
