@@ -30,7 +30,7 @@ Direct Digital Control：控制器按固定扫描周期(本仿真为 1 分钟)�
 
 import math
 
-from points.point_table import PointBus
+from points.point_table import PointBus, ROOM_NAMES
 
 
 # ======================================================================
@@ -285,7 +285,7 @@ class DDCController:
                 self.sensor_hold[i] = True
                 self._raise_alarm(abs_minute, day, mod, f"sensor_fault_AI{i+1}",
                                   "重要", self.ROOM_AI[i],
-                                  f"{['办公室','会议室','大堂'][i]}温度传感器故障，"
+                                  f"{ROOM_NAMES[i]}温度传感器故障，"
                                   f"回路输出保持")
                 outputs.append(pid.output)          # 安全保持
                 continue
@@ -305,7 +305,7 @@ class DDCController:
                 if self._high_timer[i] >= 5:         # 连续 5 分钟超限才报警
                     self._raise_alarm(abs_minute, day, mod, key_hi, "警告",
                                       self.ROOM_AI[i],
-                                      f"{['办公室','会议室','大堂'][i]}高温报警:"
+                                      f"{ROOM_NAMES[i]}高温报警:"
                                       f"PV={pv:.1f}℃>{self.high_temp_limit}℃")
             elif pv < self.high_temp_limit - self.alarm_hyst:
                 self._high_timer[i] = 0
@@ -315,7 +315,7 @@ class DDCController:
             if pv < self.low_temp_limit:
                 self._raise_alarm(abs_minute, day, mod, key_lo, "警告",
                                   self.ROOM_AI[i],
-                                  f"{['办公室','会议室','大堂'][i]}低温报警:"
+                                  f"{ROOM_NAMES[i]}低温报警:"
                                   f"PV={pv:.1f}℃<{self.low_temp_limit}℃")
             elif pv > self.low_temp_limit + self.alarm_hyst:
                 self._clear_alarm(key_lo)
@@ -355,7 +355,7 @@ class DDCController:
         另附溢流/低液位报警。
         """
         level = self.bus.read("AI5")
-        di4_float_ok = self.bus.read("DI4") >= 0.5     # 1=未到高位
+        di4_float_ok = self.bus.read_bool("DI4")       # 1=未到高位
 
         if not di4_float_ok:
             self.tank_valve_state = False              # 浮球硬限位优先
@@ -393,7 +393,7 @@ class DDCController:
                            恢复前禁止再次启动(锁定，防止反复重启损坏设备)。
         :return: cooling_allowed —— 是否允许冷冻水阀输出冷量
         """
-        fire_closed = self.bus.read("DI1") < 0.5       # 0 = 防火阀已关闭
+        fire_closed = not self.bus.read_bool("DI1")    # 0 = 防火阀已关闭
 
         # ---------------- 防火阀联锁（最高优先级）----------------
         if fire_closed:
@@ -430,7 +430,7 @@ class DDCController:
                 self._state_timer = 0
         elif self.state == DDCController.ST_FAN_STARTING:
             # 风机已启动，延时确认运行电流正常后再投入冷冻水(防带故障载冷)
-            fan_fault = self.bus.read("DI3") < 0.5
+            fan_fault = not self.bus.read_bool("DI3")
             self._write_fan_outputs(True, True, False, 0.0)
             if fan_fault:
                 self._raise_alarm(abs_minute, day, mod, "fan_fault",

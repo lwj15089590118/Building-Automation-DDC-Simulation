@@ -40,7 +40,7 @@ plant/thermal.py —— 房间 RC 热网络模型（受控对象·核心之一�
 import math
 import random
 
-from points.point_table import PointBus
+from points.point_table import PointBus, ROOM_NAMES
 
 
 # ======================================================================
@@ -65,12 +65,13 @@ class RoomParams:
 
 
 #: 三个房间的参数表（C、UA 取值使时间常数 τ=C/UA 约 3~5 小时，接近真实房间）
+#: 房间名称取自点表的 ROOM_NAMES（唯一来源），顺序与 AI1~AI3/AO1~AO3 对应
 ROOM_PARAMS: list[RoomParams] = [
-    RoomParams("办公室", area_m2=60.0, capacitance=2.5e6, conductance=160.0,
+    RoomParams(ROOM_NAMES[0], area_m2=60.0, capacitance=2.5e6, conductance=160.0,
                people_max=8, q_equip_max=900.0, q_solar_max=2200.0, q_cool_max=6000.0),
-    RoomParams("会议室", area_m2=40.0, capacitance=2.0e6, conductance=130.0,
+    RoomParams(ROOM_NAMES[1], area_m2=40.0, capacitance=2.0e6, conductance=130.0,
                people_max=10, q_equip_max=350.0, q_solar_max=1500.0, q_cool_max=5000.0),
-    RoomParams("大堂",   area_m2=120.0, capacitance=4.0e6, conductance=280.0,
+    RoomParams(ROOM_NAMES[2], area_m2=120.0, capacitance=4.0e6, conductance=280.0,
                people_max=10, q_equip_max=500.0, q_solar_max=4200.0, q_cool_max=12000.0),
 ]
 
@@ -300,7 +301,7 @@ class BuildingPlant:
     # ---------------- 执行器指令读取 ----------------
     def _read_fan_ratio(self) -> float:
         """送风机频率比 freq/50（DO2 未启动或频率为 0 时视为停机）。"""
-        fan_on = self.bus.read("DO2") >= 0.5
+        fan_on = self.bus.read_bool("DO2")
         freq_hz = self.bus.read("AO4")
         if not fan_on or freq_hz <= 0.5:
             return 0.0
@@ -334,7 +335,7 @@ class BuildingPlant:
             ops.append(op)
             room.step(minute_of_day, op, fan_ratio, dt_min)
         # ---- 水箱：进水阀 DO4 开度即开关量，出水负载按时间表 ----
-        inflow_open = self.bus.read("DO4") >= 0.5
+        inflow_open = self.bus.read_bool("DO4")
         self.tank.step(inflow_open, minute_of_day, dt_min)
         # ---- 写测量值回总线 ----
         for i, room in enumerate(self.rooms):

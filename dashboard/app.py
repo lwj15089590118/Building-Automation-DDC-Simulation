@@ -37,12 +37,11 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from flask import Flask, jsonify, render_template, request   # noqa: E402
 
-from points.point_table import PointBus, ModbusSlaveServer   # noqa: E402
+from points.point_table import (PointBus, ModbusSlaveServer,   # noqa: E402
+                                ROOM_NAMES)
 from plant.thermal import BuildingPlant                      # noqa: E402
 from ddc.ddc_controller import DDCController                 # noqa: E402
 from energy.analyzer import EnergyAnalyzer                   # noqa: E402
-
-ROOM_NAMES = ["办公室", "会议室", "大堂"]
 
 #: 状态机状态 → 中文说明（看板显示用）
 STATE_CN = {
@@ -102,24 +101,26 @@ class SimulationEngine(threading.Thread):
         """推进一步（1 仿真分钟）并记录历史。"""
         snapshot = self.plant.step(self.minute_of_day)
         self.ddc.scan(self.day, self.minute_of_day)
-        fan_on = self.bus.read("DO2") >= 0.5
+        fan_on = self.bus.read_bool("DO2")
         self.analyzer.update(sum(snapshot["q_cools"]), fan_on,
-                             self.bus.read("AO4"), self.bus.read("DO3") >= 0.5)
+                             self.bus.read("AO4"), self.bus.read_bool("DO3"))
         # ---- 记录历史 ----
+        pvs = []                       # 传感器故障时该房间为 None
+        for i in range(3):
+            v = self.bus.read_ai(f"AI{i+1}")
+            pvs.append(round(v, 2) if v is not None else None)
         rec = {
             "t": (self.day - 1) * 1440 + self.minute_of_day,   # 绝对分钟
             "day": self.day,
             "mod": self.minute_of_day,
-            "pv": [round(self.bus.read(f"AI{i+1}"), 2) if
-                   self.bus.read(f"AI{i+1}") == self.bus.read(f"AI{i+1}") else None
-                   for i in range(3)],
+            "pv": pvs,
             "sp": [round(s, 1) for s in self.ddc.current_sp],
             "op": [round(self.bus.read(f"AO{i+1}"), 1) for i in range(3)],
             "fan": int(fan_on),
-            "pump": int(self.bus.read("DO3") >= 0.5),
-            "damper": int(self.bus.read("DO1") >= 0.5),
+            "pump": int(self.bus.read_bool("DO3")),
+            "damper": int(self.bus.read_bool("DO1")),
             "tank": round(self.bus.read("AI5"), 3),
-            "tank_v": int(self.bus.read("DO4") >= 0.5),
+            "tank_v": int(self.bus.read_bool("DO4")),
             "state": self.ddc.state,
             "alarms": self.ddc.alarm_count,
             "energy": round(self.analyzer.result.total_kwh, 3),
@@ -199,6 +200,7 @@ def api_state():
         "time_str": DDCController.fmt_time(engine.day, engine.minute_of_day),
         "speed": engine.speed,
         "paused": engine.speed == 0,
+        "rooms": ROOM_NAMES,          # 房间名下发给前端，前端不硬编码
         "pv": [_pv(f"AI{i+1}") for i in range(3)],
         "outdoor": _pv("AI4"),
         "tank_level": _pv("AI5"),

@@ -161,29 +161,10 @@
     </div>
 
     <!-- ===================== SP 在线修改 ===================== -->
+    <!-- SP 行由 JS 依据 /api/state 下发的 rooms 动态生成(不硬编码房间名) -->
     <div class="card c-sp">
       <h2>设定温度在线修改</h2>
-      <div class="sp-row" id="sprow-0"><span class="sp-name">办公室</span>
-        <span class="sp-val" id="spval-0">24.0℃</span>
-        <span class="sp-btns">
-          <button class="btn" onclick="setSp(0,'dec')">−0.5</button>
-          <button class="btn" onclick="setSp(0,'inc')">+0.5</button>
-          <button class="btn" onclick="setSp(0,'auto')">自动</button>
-        </span></div>
-      <div class="sp-row" id="sprow-1"><span class="sp-name">会议室</span>
-        <span class="sp-val" id="spval-1">24.0℃</span>
-        <span class="sp-btns">
-          <button class="btn" onclick="setSp(1,'dec')">−0.5</button>
-          <button class="btn" onclick="setSp(1,'inc')">+0.5</button>
-          <button class="btn" onclick="setSp(1,'auto')">自动</button>
-        </span></div>
-      <div class="sp-row" id="sprow-2"><span class="sp-name">大堂</span>
-        <span class="sp-val" id="spval-2">24.0℃</span>
-        <span class="sp-btns">
-          <button class="btn" onclick="setSp(2,'dec')">−0.5</button>
-          <button class="btn" onclick="setSp(2,'inc')">+0.5</button>
-          <button class="btn" onclick="setSp(2,'auto')">自动</button>
-        </span></div>
+      <div id="spRows"></div>
       <div style="margin-top:10px;text-align:center">
         <button class="btn" id="savingBtn" onclick="toggleMode('energy_saving')">
           切换节能模式</button>
@@ -209,13 +190,27 @@
 /* ==========================================================
  * 一、全局状态与图表初始化
  * ========================================================== */
-const ROOMS = ['办公室','会议室','大堂'];
+/* 房间名不在此硬编码：由 /api/state 下发(s.rooms)，首帧渲染 SP 行后生效 */
+let ROOMS = ['房间1','房间2','房间3'];   // 接口下发前的占位
 const COLORS = ['#38bdf8','#f59e0b','#34d399'];
 let histData = null;          // 最近一次 /api/history 结果
 let replayIdx = null;         // 回放下标(null=实时)
 const tempChart = echarts.init(document.getElementById('tempChart'));
 const energyChart = echarts.init(document.getElementById('energyChart'));
 window.addEventListener('resize',()=>{tempChart.resize();energyChart.resize();});
+
+/* 依据房间名列表动态生成"设定温度在线修改"行（含 −0.5/+0.5/自动 按钮） */
+function buildSpRows(){
+  const box=document.getElementById('spRows');
+  box.innerHTML=ROOMS.map((name,i)=>`
+    <div class="sp-row" id="sprow-${i}"><span class="sp-name">${name}</span>
+      <span class="sp-val" id="spval-${i}">--</span>
+      <span class="sp-btns">
+        <button class="btn" onclick="setSp(${i},'dec')">−0.5</button>
+        <button class="btn" onclick="setSp(${i},'inc')">+0.5</button>
+        <button class="btn" onclick="setSp(${i},'auto')">自动</button>
+      </span></div>`).join('');
+}
 
 /* 温度趋势图基础配置：3 条 PV 曲线 + markArea 死区阴影带 */
 function renderTemp(){
@@ -256,7 +251,7 @@ function renderTemp(){
       ...ROOMS.map((r,i)=>({name:r,type:'line',showSymbol:false,
         data:slice(histData.pv[i]),lineStyle:{width:1.6,color:COLORS[i]},
         itemStyle:{color:COLORS[i]},connectNulls:false})),
-      {name:'设定值SP(办公室)',type:'line',showSymbol:false,
+      {name:'设定值SP('+ROOMS[0]+')',type:'line',showSymbol:false,
         data:slice(histData.sp[0]),lineStyle:{width:1.4,type:'dashed',
         color:'#e2e8f0'},itemStyle:{color:'#e2e8f0'},
         markArea:{silent:true,data:areas}}
@@ -303,6 +298,11 @@ function renderEnergy(strategies,live){
 async function pollState(){
   try{
     const r=await fetch('/api/state');const s=await r.json();
+    // ---- 房间名(后端唯一来源下发；变化时重建 SP 行) ----
+    if(s.rooms && s.rooms.join()!==ROOMS.join()){
+      ROOMS=s.rooms;
+      buildSpRows();
+    }
     // ---- 时钟与徽章 ----
     document.getElementById('clock').textContent=s.time_str;
     setBadge('modeSaving',s.mode.energy_saving,'节能模式','夜间停机');
@@ -326,9 +326,10 @@ async function pollState(){
     document.getElementById('hzTxt').textContent=s.fan_hz+' Hz';
     document.getElementById('kwhTxt').textContent=s.energy_today+' kWh';
     // ---- SP 显示 ----
-    for(let i=0;i<3;i++){
-      document.getElementById('spval-'+i).textContent=
-        s.sp[i].toFixed(1)+'℃'+(s.sp_manual[i]?'(手动)':'');
+    for(let i=0;i<s.sp.length;i++){
+      const valEl=document.getElementById('spval-'+i);
+      if(!valEl) continue;               // SP 行尚未生成时跳过本帧
+      valEl.textContent=s.sp[i].toFixed(1)+'℃'+(s.sp_manual[i]?'(手动)':'');
       document.getElementById('sprow-'+i).style.borderColor=
         s.sp_manual[i]?'var(--warn)':'';
     }
@@ -407,7 +408,8 @@ function backToLive(){
   renderTemp();
 }
 
-/* 启动轮询：状态 1 秒 / 历史 5 秒 */
+/* 启动：先生成 SP 行占位，再开始轮询(状态 1 秒 / 历史 5 秒) */
+buildSpRows();
 pollState();pollHistory();
 setInterval(pollState,1000);
 setInterval(pollHistory,5000);

@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from points.point_table import PointBus          # noqa: E402
+from points.point_table import PointBus, ROOM_NAMES  # noqa: E402
 from plant.thermal import BuildingPlant          # noqa: E402
 from ddc.ddc_controller import DDCController     # noqa: E402
 from energy.analyzer import (EnergyAnalyzer,     # noqa: E402
@@ -49,7 +49,7 @@ SENSOR_FAULT_MIN = 600             # 10:00 注入传感器故障
 SENSOR_FAULT_DUR = 8               # 持续 8 分钟
 FIRE_MIN = 900                     # 15:00 防火阀动作
 FIRE_DUR = 12                      # 持续 12 分钟
-ROOM_NAMES = ["办公室", "会议室", "大堂"]
+# 房间名称使用 points.point_table.ROOM_NAMES（唯一来源）
 DOC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs")
 
 
@@ -103,24 +103,24 @@ def run_one_day(energy_saving: bool, seed: int = 2024) -> DayRunResult:
         ddc.scan(1, m)
 
         # ---- 能耗累计 ----
-        fan_on = bus.read("DO2") >= 0.5
+        fan_on = bus.read_bool("DO2")
         fan_hz = bus.read("AO4")
-        pump_on = bus.read("DO3") >= 0.5
+        pump_on = bus.read_bool("DO3")
         analyzer.update(sum(snapshot["q_cools"]), fan_on, fan_hz, pump_on)
 
         # ---- 历史记录 ----
         h = result.history
         h["minute"].append(m)
         for i in range(3):
-            pv = bus.read(f"AI{i + 1}")
-            h["pv"][i].append(round(pv, 2) if pv == pv else None)  # NaN→null
+            pv = bus.read_ai(f"AI{i + 1}")          # 传感器故障时为 None
+            h["pv"][i].append(round(pv, 2) if pv is not None else None)
             h["sp"][i].append(round(ddc.current_sp[i], 1))
             h["op"][i].append(round(bus.read(f"AO{i + 1}"), 1))
         h["fan_on"].append(int(fan_on))
         h["pump_on"].append(int(pump_on))
-        h["damper_on"].append(int(bus.read("DO1") >= 0.5))
+        h["damper_on"].append(int(bus.read_bool("DO1")))
         h["tank_level"].append(round(bus.read("AI5"), 3))
-        h["tank_valve"].append(int(bus.read("DO4") >= 0.5))
+        h["tank_valve"].append(int(bus.read_bool("DO4")))
 
     # ---- 汇总 ----
     result.energy = analyzer.result

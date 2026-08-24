@@ -111,6 +111,11 @@ POINT_DO = [
 #: 完整点表 = AI + AO + DI + DO（供看板/文档生成用）
 ALL_POINTS = POINT_AI + POINT_AO + POINT_DI + POINT_DO
 
+#: 房间名称唯一来源（全项目唯一定义处，其余模块一律从此导入）：
+#: 顺序与 AI1~AI3 / AO1~AO3 点位及 plant.thermal.ROOM_PARAMS 严格对应。
+#: 新增房间时只需修改本列表、点表与 ROOM_PARAMS 三处同源定义。
+ROOM_NAMES = ["办公室", "会议室", "大堂"]
+
 # 寄存器哨兵值：传感器开路/故障时 AI 寄存器写 32767，读取方换算回 NaN
 REG_SENSOR_FAULT = 32767
 
@@ -180,6 +185,21 @@ class PointBus:
             if addr.startswith("AI") and self._fault[addr]:
                 return float("nan")
             return self._eng[addr]
+
+    def read_bool(self, addr: str) -> bool:
+        """
+        按布尔语义读开关量(DI/DO)：工程值 >= 0.5 视为 True。
+        统一收口"0.5 阈值判断"，避免调用方各自硬编码魔法数字。
+        """
+        return self.read(addr) >= 0.5
+
+    def read_ai(self, addr: str) -> float | None:
+        """
+        读模拟量输入(AI)，传感器故障(NaN)时返回 None 而不是 NaN，
+        调用方用 `is None` 判断坏值，避免各处重复 `v != v` 写法。
+        """
+        v = self.read(addr)
+        return None if v != v else v
 
     def read_all(self) -> dict[str, float]:
         """一次性快照全部工程值（看板轮询用）。"""
