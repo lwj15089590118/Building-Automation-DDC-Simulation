@@ -294,25 +294,11 @@ class DDCController:
                 self._clear_alarm(f"sensor_fault_AI{i+1}")
                 pid.reset()
 
-            if not cooling_allowed:
-                # 系统未投入(停机/联锁中)：阀全关，复位回路
-                pid.reset()
-                pid.output = 0.0
-                outputs.append(0.0)
-                continue
-
-            err = pv - sp                            # 制冷偏差
-            if pv < sp - self.deadband:
-                # 温度已低于下死区 → 制冷关闭
-                pid.reset()
-                pid.output = 0.0
-                out = 0.0
-            elif pv > sp + self.deadband:
-                out = pid.update(err, dt_min=1.0)    # 上死区外 → PID 调节
-            else:
-                out = pid.output                     # 死区内 → 保持原开度
-
             # ---- 高温/低温报警（带持续时间去抖与恢复回差）----
+            # 报警监控是连续的，不受系统启停影响：夜间 setback 停机漂移、
+            # 防火阀联锁停机期间的室温越限同样必须进入报警队列
+            # （规格要求"高温/低温……全部进报警队列"），故此段必须在
+            # cooling_allowed 判定之前执行。
             key_hi = f"high_temp_room{i}"
             if pv > self.high_temp_limit:
                 self._high_timer[i] += 1
@@ -333,6 +319,25 @@ class DDCController:
                                   f"PV={pv:.1f}℃<{self.low_temp_limit}℃")
             elif pv > self.low_temp_limit + self.alarm_hyst:
                 self._clear_alarm(key_lo)
+
+            if not cooling_allowed:
+                # 系统未投入(停机/联锁中)：阀全关，复位回路。
+                # 只跳过调节，不跳过上面的报警监控。
+                pid.reset()
+                pid.output = 0.0
+                outputs.append(0.0)
+                continue
+
+            err = pv - sp                            # 制冷偏差
+            if pv < sp - self.deadband:
+                # 温度已低于下死区 → 制冷关闭
+                pid.reset()
+                pid.output = 0.0
+                out = 0.0
+            elif pv > sp + self.deadband:
+                out = pid.update(err, dt_min=1.0)    # 上死区外 → PID 调节
+            else:
+                out = pid.output                     # 死区内 → 保持原开度
 
             outputs.append(max(0.0, min(100.0, out)))
         return outputs
