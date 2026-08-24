@@ -39,6 +39,7 @@ plant/thermal.py —— 房间 RC 热网络模型（受控对象·核心之一�
 
 import math
 import random
+from dataclasses import dataclass
 
 from points.point_table import PointBus, ROOM_NAMES
 
@@ -129,12 +130,79 @@ class OutdoorWeather:
 
 
 # ======================================================================
-# 三、作息时间表（人员/设备负荷计划）
+# 三、作息时间表（人员/设备负荷计划，表驱动）
 # ======================================================================
+
+def _lobby_people(h: float) -> int:
+    """大堂人流曲线：07:00~20:00 呈单峰分布，峰值约 10 人。"""
+    return round(6 + 4 * math.sin((h - 7.0) / 13.0 * math.pi))
+
+
+@dataclass
+class RoomScheduleSpec:
+    """
+    单个房间的作息计划规格（表驱动配置，替代按房间编号的 if 级联）。
+
+    people_periods : [(起始小时, 结束小时, 人数 | 以小时为参的 callable), ...]
+                     区间为左闭右开，未命中任何区间时人数为 0；
+    equip_periods  : [(起始小时, 结束小时, 功率系数), ...]，同样左闭右开；
+    equip_idle_k   : 未命中任何设备区间时的待机功率系数。
+    """
+    name: str                                   # 房间名(与 ROOM_NAMES 对应，便于阅读)
+    people_periods: list[tuple]
+    equip_periods: list[tuple]
+    equip_idle_k: float
+
+    @staticmethod
+    def _hit(minute: int, start_h: float, end_h: float) -> bool:
+        """判断当前分钟是否落入 [start_h, end_h) 小时区间。"""
+        return start_h * 60 <= minute < end_h * 60
+
+    def people_at(self, minute: int) -> int:
+        """查询当前计划人数（不含随机抖动）。"""
+        h = minute / 60.0
+        for start_h, end_h, value in self.people_periods:
+            if self._hit(minute, start_h, end_h):
+                # 第三元素可为整数，也可为"小时→人数"的曲线函数(如大堂人流)
+                return value(h) if callable(value) else value
+        return 0
+
+    def equip_at(self, minute: int) -> float:
+        """查询当前设备功率系数(0~1)。"""
+        for start_h, end_h, k in self.equip_periods:
+            if self._hit(minute, start_h, end_h):
+                return k
+        return self.equip_idle_k
+
+
+#: 三房间的作息规格表：新增/修改房间只改这一张表
+ROOM_SCHEDULES: list[RoomScheduleSpec] = [
+    RoomScheduleSpec(
+        name=ROOM_NAMES[0],                    # 办公室：08:30~18:00 上班，
+                                               # 12:00~13:30 午休留值守人员
+        people_periods=[(8.5, 12.0, 8), (12.0, 13.5, 2), (13.5, 18.0, 8)],
+        equip_periods=[(8.0, 18.5, 1.0)],      # 设备白天全开，夜间仅服务器约 10%
+        equip_idle_k=0.1,
+    ),
+    RoomScheduleSpec(
+        name=ROOM_NAMES[1],                    # 会议室：上午十人例会+下午六人会
+        people_periods=[(9.5, 11.5, 10), (14.0, 16.0, 6)],
+        equip_periods=[(9.5, 11.5, 1.0), (14.0, 16.0, 1.0)],  # 有会才开投影等
+        equip_idle_k=0.05,
+    ),
+    RoomScheduleSpec(
+        name=ROOM_NAMES[2],                    # 大堂：营业时段人流量呈单峰曲线
+        people_periods=[(7.0, 20.0, _lobby_people)],
+        equip_periods=[(7.0, 20.0, 1.0)],      # 营业时段显示屏/照明全开，
+        equip_idle_k=0.15,                      # 夜间保留安防最低负荷
+    ),
+]
+
 
 class OccupancySchedule:
     """
     作息时间表：返回某时刻各房间的人数与设备功率系数。
+    具体计划集中在 ROOM_SCHEDULES 规格表中，本类只负责查表 + 到岗率抖动。
 
     时间表是 BA 系统"时间表控制(Schedule)"的物理侧对应物——
     DDC 按时间表调设定值，而负荷本身也按作息出现，两者共同决定能耗。
@@ -143,58 +211,16 @@ class OccupancySchedule:
     def __init__(self, rng: random.Random) -> None:
         self.rng = rng
 
-    @staticmethod
-    def _in(minute: int, start_h: float, end_h: float) -> bool:
-        """判断当前分钟是否处于 [start_h, end_h) 小时区间。"""
-        return start_h * 60 <= minute < end_h * 60
-
     def people_count(self, room_idx: int, minute: int) -> int:
         """各房间当前人数（含到岗率的随机抖动，更贴近实际）。"""
-        h = minute / 60.0
-        if room_idx == 0:      # 办公室：08:30~18:00 上班，12:00~13:30 午休留 1~2 人
-            if OccupancySchedule._in(minute, 8.5, 12.0):
-                n = 8
-            elif OccupancySchedule._in(minute, 12.0, 13.5):
-                n = 2
-            elif OccupancySchedule._in(minute, 13.5, 18.0):
-                n = 8
-            else:
-                n = 0
-        elif room_idx == 1:    # 会议室：上午 09:30~11:30 十人例会，下午 14:00~16:00 六人会
-            if OccupancySchedule._in(minute, 9.5, 11.5):
-                n = 10
-            elif OccupancySchedule._in(minute, 14.0, 16.0):
-                n = 6
-            else:
-                n = 0
-        else:                  # 大堂：07:00~20:00 有人流量，呈双峰分布
-            if OccupancySchedule._in(minute, 7.0, 20.0):
-                n = round(6 + 4 * math.sin((h - 7.0) / 13.0 * math.pi))
-            else:
-                n = 0
-        # 到岗率抖动：±1 人，且不低于 0
+        n = ROOM_SCHEDULES[room_idx].people_at(minute)
+        # 到岗率抖动：±1 人，且不低于 0、不超过设计人数
         jitter = self.rng.choice((-1, 0, 0, 1))
         return max(0, min(n + jitter, ROOM_PARAMS[room_idx].people_max))
 
     def equip_power(self, room_idx: int, minute: int) -> float:
         """各房间当前设备功率系数(0~1)。"""
-        if room_idx == 0:      # 办公室：08:00~18:30 设备全开，夜间仅服务器约 10%
-            if OccupancySchedule._in(minute, 8.0, 18.5):
-                k = 1.0
-            else:
-                k = 0.1
-        elif room_idx == 1:    # 会议室：有会议时投影等设备开启
-            if (OccupancySchedule._in(minute, 9.5, 11.5)
-                    or OccupancySchedule._in(minute, 14.0, 16.0)):
-                k = 1.0
-            else:
-                k = 0.05
-        else:                  # 大堂：营业时段显示屏/照明，夜间安防最低负荷
-            if OccupancySchedule._in(minute, 7.0, 20.0):
-                k = 1.0
-            else:
-                k = 0.15
-        return k
+        return ROOM_SCHEDULES[room_idx].equip_at(minute)
 
 
 # ======================================================================
