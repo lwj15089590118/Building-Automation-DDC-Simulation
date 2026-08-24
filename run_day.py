@@ -35,7 +35,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from points.point_table import PointBus, ROOM_NAMES  # noqa: E402
 from plant.thermal import BuildingPlant          # noqa: E402
-from ddc.ddc_controller import DDCController     # noqa: E402
+from ddc.ddc_controller import DDCController, SimTime  # noqa: E402
 from energy.analyzer import (EnergyAnalyzer,     # noqa: E402
                              EnergyResult, compare_strategies)
 
@@ -100,7 +100,7 @@ def run_one_day(energy_saving: bool, seed: int = 2024) -> DayRunResult:
 
         # ---- 受控对象演化 → DDC 扫描 ----
         snapshot = plant.step(m)          # 物理演化，返回本周期工况快照
-        ddc.scan(1, m)
+        ddc.scan(SimTime(1, m))
 
         # ---- 能耗累计 ----
         fan_on = bus.read_bool("DO2")

@@ -29,8 +29,34 @@ Direct Digital Control：控制器按固定扫描周期(本仿真为 1 分钟)�
 """
 
 import math
+from dataclasses import dataclass
 
 from points.point_table import PointBus, ROOM_NAMES
+
+
+# ======================================================================
+# 〇、仿真时刻值对象
+# ======================================================================
+
+@dataclass(frozen=True)
+class SimTime:
+    """
+    仿真时刻值对象：第几天 + 当天分钟。
+    绝对分钟数与中文显示串均由此派生，取代在控制器各私有方法间
+    结伴穿透的 (abs_minute, day, mod) 三参数"数据泥团"。
+    """
+    day: int      # 第几天(从 1 开始)
+    minute: int   # 当天第几分钟(0~1439)
+
+    @property
+    def abs_minute(self) -> int:
+        """从仿真 0 时起算的绝对分钟数。"""
+        return (self.day - 1) * 1440 + self.minute
+
+    @property
+    def fmt(self) -> str:
+        """显示串："第X天 HH:MM"。"""
+        return f"第{self.day}天 {self.minute // 60:02d}:{self.minute % 60:02d}"
 
 
 # ======================================================================
@@ -194,19 +220,14 @@ class DDCController:
     # ==================================================
     # 工具函数
     # ==================================================
-    @staticmethod
-    def fmt_time(day: int, minute_of_day: int) -> str:
-        """把仿真时间格式化为 '第X天 HH:MM'。"""
-        return f"第{day}天 {minute_of_day // 60:02d}:{minute_of_day % 60:02d}"
-
-    def _raise_alarm(self, abs_minute: int, day: int, mod: int,
+    def _raise_alarm(self, now: SimTime,
                      key: str, level: str, source: str, message: str) -> bool:
         """产生一条报警（同键活动期间去重）。返回是否真正产生了新报警。"""
         if self._active_alarms.get(key):
             return False
         self._active_alarms[key] = True
         self.alarm_queue.append(
-            AlarmRecord(abs_minute, self.fmt_time(day, mod), level, source, message))
+            AlarmRecord(now.abs_minute, now.fmt, level, source, message))
         self.alarm_count += 1
         return True
 
@@ -264,7 +285,7 @@ class DDCController:
     # ③a 空调温度回路（PID + 死区）
     # ==================================================
     def _control_rooms(self, sp_list: list[float], cooling_allowed: bool,
-                       abs_minute: int, day: int, mod: int) -> list[float]:
+                       now: SimTime) -> list[float]:
         """
         三个房间独立 PID 控温。
         死区逻辑(±deadband)：PV < SP−db → 阀全关并复位积分；
@@ -283,7 +304,7 @@ class DDCController:
             # ---- 传感器故障检测（NaN 或物理超限）----
             if math.isnan(pv) or pv < -20.0 or pv > 60.0:
                 self.sensor_hold[i] = True
-                self._raise_alarm(abs_minute, day, mod, f"sensor_fault_AI{i+1}",
+                self._raise_alarm(now, f"sensor_fault_AI{i+1}",
                                   "重要", self.ROOM_AI[i],
                                   f"{ROOM_NAMES[i]}温度传感器故障，"
                                   f"回路输出保持")
@@ -303,7 +324,7 @@ class DDCController:
             if pv > self.high_temp_limit:
                 self._high_timer[i] += 1
                 if self._high_timer[i] >= 5:         # 连续 5 分钟超限才报警
-                    self._raise_alarm(abs_minute, day, mod, key_hi, "警告",
+                    self._raise_alarm(now, key_hi, "警告",
                                       self.ROOM_AI[i],
                                       f"{ROOM_NAMES[i]}高温报警:"
                                       f"PV={pv:.1f}℃>{self.high_temp_limit}℃")
@@ -313,7 +334,7 @@ class DDCController:
 
             key_lo = f"low_temp_room{i}"
             if pv < self.low_temp_limit:
-                self._raise_alarm(abs_minute, day, mod, key_lo, "警告",
+                self._raise_alarm(now, key_lo, "警告",
                                   self.ROOM_AI[i],
                                   f"{ROOM_NAMES[i]}低温报警:"
                                   f"PV={pv:.1f}℃<{self.low_temp_limit}℃")
@@ -345,7 +366,7 @@ class DDCController:
     # ==================================================
     # ③b 水箱液位回路（位式控制 + 大回差）
     # ==================================================
-    def _control_tank(self, abs_minute: int, day: int, mod: int) -> None:
+    def _control_tank(self, now: SimTime) -> None:
         """
         位式(ON/OFF)控制：
           液位 ≤ tank_low(1.0m)  → 开进水阀；
@@ -367,12 +388,12 @@ class DDCController:
 
         # ---- 水箱相关报警 ----
         if level >= 1.90:
-            self._raise_alarm(abs_minute, day, mod, "tank_overflow", "重要", "AI5",
+            self._raise_alarm(now, "tank_overflow", "重要", "AI5",
                               f"水箱液位过高({level:.2f}m)，存在溢流风险")
         elif level <= 1.70:
             self._clear_alarm("tank_overflow")
         if level <= 0.20:
-            self._raise_alarm(abs_minute, day, mod, "tank_lowlevel", "警告", "AI5",
+            self._raise_alarm(now, "tank_lowlevel", "警告", "AI5",
                               f"水箱低液位({level:.2f}m)，请检查供水")
         elif level >= 0.50:
             self._clear_alarm("tank_lowlevel")
@@ -382,8 +403,7 @@ class DDCController:
     # ==================================================
     # ④ 联锁顺序控制（风机启动顺序状态机）
     # ==================================================
-    def _interlock_sequence(self, run_request: bool,
-                            abs_minute: int, day: int, mod: int) -> bool:
+    def _interlock_sequence(self, run_request: bool, now: SimTime) -> bool:
         """
         风机启动联锁状态机。
         启动顺序：新风阀开 → 延时(damper_delay) → 送/排风机启动 → 延时(fan_delay)
@@ -404,7 +424,7 @@ class DDCController:
                 self._write_fan_outputs(False, False, False, 0.0)
                 if not self._fire_lockout:
                     self.interlock_count += 1
-                    self._raise_alarm(abs_minute, day, mod, "fire_interlock",
+                    self._raise_alarm(now, "fire_interlock",
                                       "重要", "DI1",
                                       "防火阀关闭联锁动作：立即停风机/水泵并关闭新风阀")
                 self._fire_lockout = True
@@ -433,7 +453,7 @@ class DDCController:
             fan_fault = not self.bus.read_bool("DI3")
             self._write_fan_outputs(True, True, False, 0.0)
             if fan_fault:
-                self._raise_alarm(abs_minute, day, mod, "fan_fault",
+                self._raise_alarm(now, "fan_fault",
                                   "重要", "DI3", "送风机故障反馈，禁止投入冷冻水泵")
                 return False
             self._state_timer += 1
@@ -474,28 +494,24 @@ class DDCController:
     # ==================================================
     # 主扫描函数（DDC 每个周期调用一次）
     # ==================================================
-    def scan(self, day: int, minute_of_day: int, dt_min: float = 1.0) -> None:
+    def scan(self, now: SimTime, dt_min: float = 1.0) -> None:
         """
         执行一个完整扫描周期：读输入 → 时间表 → 回路 → 联锁 → 报警 → 写输出。
-        :param day:           仿真第几天(从 1 开始)
-        :param minute_of_day: 当天第几分钟(0~1439)
+        :param now:   当前仿真时刻(SimTime 值对象)
+        :param dt_min: 扫描周期对应的仿真分钟数(保留扩展用)
         """
-        abs_minute = (day - 1) * 1440 + minute_of_day
-        mod = minute_of_day
-
         # ① 读手/自动状态(DI2)与节能模式(HR 模式字)
         # ② 时间表 → 使能与 SP
-        run_request, sp_list = self._schedule(self.bus.energy_saving, mod)
+        run_request, sp_list = self._schedule(self.bus.energy_saving, now.minute)
 
         # ③b 水箱位式控制（独立于空调系统，24h 运行）
-        self._control_tank(abs_minute, day, mod)
+        self._control_tank(now)
 
         # ④ 联锁状态机 → 是否允许供冷
-        cooling_allowed = self._interlock_sequence(run_request, abs_minute, day, mod)
+        cooling_allowed = self._interlock_sequence(run_request, now)
 
         # ③a 三房间 PID 控温（仅 RUNNING 时有冷量输出）
-        outputs = self._control_rooms(sp_list, cooling_allowed,
-                                      abs_minute, day, mod)
+        outputs = self._control_rooms(sp_list, cooling_allowed, now)
         for i, out in enumerate(outputs):
             self.bus.write(self.ROOM_AO[i], out)
 
@@ -532,7 +548,7 @@ if __name__ == "__main__":
     plant_mod = BuildingPlant(bus)
     for m in range(1440):
         plant_mod.step(m)
-        ddc.scan(1, m)
+        ddc.scan(SimTime(1, m))
         if m % 120 == 0:
             print(f"{m//60:02d}:{m%60:02d} 状态={ddc.state:<14} "
                   f"PV={[round(bus.read(a),2) for a in ('AI1','AI2','AI3')]} "

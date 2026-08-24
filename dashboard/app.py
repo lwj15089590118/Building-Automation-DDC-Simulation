@@ -40,7 +40,7 @@ from flask import Flask, jsonify, render_template, request   # noqa: E402
 from points.point_table import (PointBus, ModbusSlaveServer,   # noqa: E402
                                 ROOM_NAMES)
 from plant.thermal import BuildingPlant                      # noqa: E402
-from ddc.ddc_controller import DDCController                 # noqa: E402
+from ddc.ddc_controller import DDCController, SimTime         # noqa: E402
 from energy.analyzer import EnergyAnalyzer                   # noqa: E402
 
 #: 状态机状态 → 中文说明（看板显示用）
@@ -100,7 +100,7 @@ class SimulationEngine(threading.Thread):
     def _step(self) -> None:
         """推进一步（1 仿真分钟）并记录历史。"""
         snapshot = self.plant.step(self.minute_of_day)
-        self.ddc.scan(self.day, self.minute_of_day)
+        self.ddc.scan(SimTime(self.day, self.minute_of_day))
         fan_on = self.bus.read_bool("DO2")
         self.analyzer.update(sum(snapshot["q_cools"]), fan_on,
                              self.bus.read("AO4"), self.bus.read_bool("DO3"))
@@ -194,7 +194,7 @@ def api_state():
     return jsonify({
         "day": engine.day,
         "minute": engine.minute_of_day,
-        "time_str": DDCController.fmt_time(engine.day, engine.minute_of_day),
+        "time_str": SimTime(engine.day, engine.minute_of_day).fmt,
         "speed": engine.speed,
         "paused": engine.speed == 0,
         "rooms": ROOM_NAMES,          # 房间名下发给前端，前端不硬编码
