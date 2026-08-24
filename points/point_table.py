@@ -212,11 +212,6 @@ class PointBus:
                     snap[addr] = self._eng[addr]
             return snap
 
-    def is_ai_fault(self, addr: str) -> bool:
-        """查询某 AI 点是否处于传感器故障状态。"""
-        with self._lock:
-            return self._fault.get(addr, False)
-
     # -------------------- 上位机接口区 --------------------
     def set_manual_sp(self, room_idx: int, sp: float) -> None:
         """设置某房间的手动设定温度（上位机经 HR16~18 写入）。"""
@@ -399,13 +394,6 @@ def _eng_to_reg(eng: float, point: Point) -> int:
     if eng is None or (isinstance(eng, float) and math.isnan(eng)):
         return REG_SENSOR_FAULT
     return int(round(eng * point.scale))
-
-
-def _reg_to_eng(reg: int, point: Point) -> float:
-    """寄存器值 → 工程值（哨兵值 → NaN）。"""
-    if reg == REG_SENSOR_FAULT:
-        return float("nan")
-    return reg / point.scale
 
 
 class ModbusSlaveServer:

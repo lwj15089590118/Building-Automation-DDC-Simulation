@@ -21,7 +21,6 @@ plant/water_tank.py —— 生活水箱液位对象（受控对象）
 该对象只描述物理规律；"什么时候开/关进水阀"由 DDC 的位式控制决定。
 """
 
-import math
 import random
 
 

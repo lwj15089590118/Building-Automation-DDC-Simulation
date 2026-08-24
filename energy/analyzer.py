@@ -19,7 +19,7 @@ energy/analyzer.py —— 能耗统计与策略对比分析
        节能率 = (E_关 − E_开) / E_关 × 100%
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
