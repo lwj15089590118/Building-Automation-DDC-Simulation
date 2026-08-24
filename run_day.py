@@ -25,6 +25,8 @@ import json
 import os
 import sys
 
+import numpy as np  # 全天统计的向量化计算(舒适满足率/最大偏差/平均温度)
+
 # 保证在任何工作目录下都能导入项目包（plant/points/ddc/energy）
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Windows 控制台中文输出保护
@@ -120,21 +122,9 @@ def run_one_day(energy_saving: bool, seed: int = 2024) -> DayRunResult:
         h["tank_level"].append(round(bus.read("AI5"), 3))
         h["tank_valve"].append(int(bus.read("DO4") >= 0.5))
 
-        # ---- 舒适性/偏差统计（仅工作时间考核）----
-        if COMFORT_START <= m < COMFORT_END:
-            result.comfort_total += 1
-            for i in range(3):
-                pv = bus.read(f"AI{i + 1}")
-                if pv != pv:           # NaN(传感器故障)不计入舒适统计
-                    continue
-                if COMFORT_LO <= pv <= COMFORT_HI:
-                    result.comfort_ok[i] += 1
-                dev = abs(pv - ddc.current_sp[i])
-                result.max_dev[i] = max(result.max_dev[i], dev)
-                result.temp_sum[i] += pv
-
     # ---- 汇总 ----
     result.energy = analyzer.result
+    _compute_comfort_stats(result)        # numpy 向量化统计舒适性指标
     result.alarm_count = ddc.alarm_count
     result.interlock_count = ddc.interlock_count
     result.startup_count = ddc.startup_count
@@ -143,6 +133,28 @@ def run_one_day(energy_saving: bool, seed: int = 2024) -> DayRunResult:
         for a in ddc.alarm_queue
     ]
     return result
+
+
+def _compute_comfort_stats(result: DayRunResult) -> None:
+    """
+    用 numpy 对历史记录做向量化舒适性统计（工作时间考核窗口）。
+    与逐分钟仿真解耦：仿真只负责记录，统计在跑完后一次性完成。
+      - None(传感器故障 NaN) 视为无效测量；numpy 中 NaN 的区间比较恒为 False，
+        自然不计入"舒适分钟"，nansum/nanmax 也自动忽略；
+      - 舒适满足率分母固定为考核窗口 600 分钟，与运行日报口径一致。
+    """
+    result.comfort_total = COMFORT_END - COMFORT_START
+    for i in range(3):
+        pv_w = np.asarray(result.history["pv"][i][COMFORT_START:COMFORT_END],
+                          dtype=float)                     # None → NaN
+        sp_w = np.asarray(result.history["sp"][i][COMFORT_START:COMFORT_END],
+                          dtype=float)
+        in_band = (pv_w >= COMFORT_LO) & (pv_w <= COMFORT_HI)
+        result.comfort_ok[i] = int(np.count_nonzero(in_band))
+        dev = np.abs(pv_w - sp_w)
+        if np.any(~np.isnan(dev)):
+            result.max_dev[i] = float(np.nanmax(dev))
+        result.temp_sum[i] = float(np.nansum(pv_w))       # 平均温度用
 
 
 def build_report(res_on: DayRunResult, res_off: DayRunResult,
