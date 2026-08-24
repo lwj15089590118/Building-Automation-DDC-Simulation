@@ -503,16 +503,33 @@ class DDCController:
         any_active = any(self._active_alarms.values())
         self.bus.write("DO5", 1.0 if any_active else 0.0)
 
+    # ==================================================
+    # 对外只读访问器（避免外部直穿内部队列结构）
+    # ==================================================
+    def recent_alarms(self, limit: int | None = None) -> list[dict]:
+        """
+        导出报警记录（新在前），供看板/日报等外部展示使用。
+        :param limit: 最多返回条数；None=全部导出。
+        :return: [{time, level, source, message}, ...]
+        """
+        queue = self.alarm_queue[-limit:] if limit else self.alarm_queue
+        return [
+            {"time": a.time_str, "level": a.level,
+             "source": a.source, "message": a.message}
+            for a in queue[::-1]
+        ]
+
 
 if __name__ == "__main__":
     # 最小自测：构造总线，手动模拟一天的关键时刻行为
+    from plant.thermal import BuildingPlant
     from points.point_table import print_point_table
 
     print_point_table()
     bus = PointBus()
     bus.set_mode_bits(0x03)          # 节能开 + 自动
     ddc = DDCController(bus, energy_saving=True)
-    plant_mod = __import__("plant.thermal", fromlist=["BuildingPlant"]).BuildingPlant(bus)
+    plant_mod = BuildingPlant(bus)
     for m in range(1440):
         plant_mod.step(m)
         ddc.scan(1, m)

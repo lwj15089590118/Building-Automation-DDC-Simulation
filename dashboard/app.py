@@ -189,11 +189,8 @@ def api_state():
         v = snap[addr]
         return None if v != v else round(v, 2)      # NaN → null
 
-    alarms = [
-        {"time": a.time_str, "level": a.level, "source": a.source,
-         "message": a.message}
-        for a in engine.ddc.alarm_queue[-50:][::-1]
-    ]
+    alarms = engine.ddc.recent_alarms(50)     # 最近 50 条，新在前
+    energy_sum = engine.analyzer.summary()    # 能耗汇总(避免深入内部字段)
     return jsonify({
         "day": engine.day,
         "minute": engine.minute_of_day,
@@ -219,11 +216,11 @@ def api_state():
         "interlock_count": engine.ddc.interlock_count,
         "startup_count": engine.ddc.startup_count,
         "alarms": alarms,
-        "energy_today": round(engine.analyzer.result.total_kwh, 2),
+        "energy_today": energy_sum["total"],
         "energy_detail": {
-            "cooling": round(engine.analyzer.result.cooling_kwh, 2),
-            "fan": round(engine.analyzer.result.fan_kwh, 2),
-            "pump": round(engine.analyzer.result.pump_kwh, 2),
+            "cooling": energy_sum["cooling"],
+            "fan": energy_sum["fan"],
+            "pump": energy_sum["pump"],
         },
     })
 
@@ -305,15 +302,11 @@ def api_speed():
 @app.route("/api/energy")
 def api_energy():
     """能耗对比：run_day 全天结果(如有) + 看板本次运行的累计值。"""
+    live = engine.analyzer.summary()
+    live["name"] = "看板实时(自启动起)"
     return jsonify({
         "strategies": _load_strategy_data(),
-        "live": {
-            "name": "看板实时(自启动起)",
-            "cooling": round(engine.analyzer.result.cooling_kwh, 2),
-            "fan": round(engine.analyzer.result.fan_kwh, 2),
-            "pump": round(engine.analyzer.result.pump_kwh, 2),
-            "total": round(engine.analyzer.result.total_kwh, 2),
-        },
+        "live": live,
     })
 
 

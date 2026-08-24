@@ -72,6 +72,19 @@ class EnergyAnalyzer:
         if pump_on:
             self.result.pump_kwh += EnergyAnalyzer.PUMP_RATED_W * dt_h / 1000.0
 
+    def summary(self, ndigits: int = 2) -> dict:
+        """
+        能耗汇总快照，供看板/日报等外部直接使用，
+        避免调用方深入 result 内部字段自行取数。
+        :return: {name, cooling, fan, pump, total}（kWh，保留 ndigits 位小数）
+        """
+        r = self.result
+        return {"name": r.name,
+                "cooling": round(r.cooling_kwh, ndigits),
+                "fan": round(r.fan_kwh, ndigits),
+                "pump": round(r.pump_kwh, ndigits),
+                "total": round(r.total_kwh, ndigits)}
+
 
 def savings_rate(base_kwh: float, saving_kwh: float) -> float:
     """

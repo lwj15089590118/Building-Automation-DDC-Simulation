@@ -128,10 +128,7 @@ def run_one_day(energy_saving: bool, seed: int = 2024) -> DayRunResult:
     result.alarm_count = ddc.alarm_count
     result.interlock_count = ddc.interlock_count
     result.startup_count = ddc.startup_count
-    result.alarm_events = [
-        {"time": a.time_str, "level": a.level, "source": a.source, "message": a.message}
-        for a in ddc.alarm_queue
-    ]
+    result.alarm_events = ddc.recent_alarms()   # 全量导出(新在前)
     return result
 
 
