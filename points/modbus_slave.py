@@ -25,6 +25,7 @@ points/modbus_slave.py —— Modbus/TCP 从站（把 PointBus 暴露为标准�
 
 import asyncio
 import math
+import socket
 import threading
 
 # pymodbus 延迟导入说明：PointBus 是纯 Python 实现不依赖 pymodbus；
@@ -176,7 +177,9 @@ class ModbusSlaveServer:
         slave.stop()       # 优雅停止
     """
 
-    def __init__(self, bus: PointBus, host: str = "0.0.0.0", port: int = 5020) -> None:
+    def __init__(self, bus: PointBus, host: str = "127.0.0.1", port: int = 5020) -> None:
+        # 默认只绑定本机回环地址：Modbus 协议无鉴权且线圈可写(远程启停设备)，
+        # 监听 0.0.0.0 会把控制权暴露给整个局域网；需要跨机联调时显式传参覆盖。
         if not PYMODBUS_AVAILABLE:
             raise RuntimeError("未安装 pymodbus，请先执行: pip install pymodbus")
         self.bus = bus
@@ -196,12 +199,30 @@ class ModbusSlaveServer:
         self._started = threading.Event()
 
     def start(self) -> None:
-        """在后台线程中启动 Modbus/TCP 服务。"""
+        """在后台线程中启动 Modbus/TCP 服务。
+
+        启动失败必须显式暴露（不可静默）：端口被占用等错误原先只在线程内
+        打印一行，start() 照常返回，调用方误以为从站已监听、联调失败无从
+        排查。这里启动前先试绑定端口提前暴露占用，并检查后台线程是否在
+        超时内完成初始化，失败一律抛出异常。
+        """
         if self._thread and self._thread.is_alive():
             return
+        # ---- 端口预检：提前暴露"端口被占用/地址无效"并给出可读错误 ----
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind((self.host, self.port))
+        except OSError as exc:
+            raise RuntimeError(
+                f"Modbus/TCP 从站无法绑定 {self.host}:{self.port}"
+                f"（端口被占用或地址无效）: {exc}") from exc
+        finally:
+            probe.close()
         self._thread = threading.Thread(target=self._run, name="ModbusSlave", daemon=True)
         self._thread.start()
-        self._started.wait(timeout=5)
+        if not self._started.wait(timeout=5):
+            raise RuntimeError(f"Modbus/TCP 从站启动超时({self.host}:{self.port})，"
+                               f"请查看后台线程的错误输出")
 
     def _run(self) -> None:
         async def _serve():
@@ -240,7 +261,7 @@ def _demo_main() -> None:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     print_point_table()
     bus = PointBus()
-    slave = ModbusSlaveServer(bus, host="0.0.0.0", port=5020)
+    slave = ModbusSlaveServer(bus, port=5020)   # 默认绑定 127.0.0.1(本机联调)
     slave.start()
     print(f"[Modbus从站] 已启动 tcp://{slave.host}:{slave.port} (Slave ID=1)，Ctrl+C 退出")
     rng = random.Random(2024)

@@ -73,7 +73,7 @@ def main() -> int:
         # ---- ② 读离散输入 DI1~DI4 (fc02) ----
         rr = client.read_discrete_inputs(0, 4, slave=SLAVE_ID)
         assert not rr.isError(), f"读DI失败: {rr}"
-        di_desc = ["防火阀关闭信号(1=正常)", "手/自动(1=自动)",
+        di_desc = ["防火阀关闭信号(1=正常)", "手/自动模式反馈(1=自动，判定源=HR20.bit1)",
                    "风机故障反馈(1=正常)", "水箱高位浮球(1=未到高位)"]
         print("── 步骤① 读离散输入 DI1~DI4 (fc02) ──")
         for i, v in enumerate(rr.bits[:4]):

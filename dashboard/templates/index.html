@@ -140,7 +140,7 @@
           室外温度：<b id="outTxt">-- ℃</b><br>
           冷冻水温：<b id="chwsTxt">-- ℃</b><br>
           风机频率：<b id="hzTxt">-- Hz</b><br>
-          今日累计能耗：<b id="kwhTxt" style="color:var(--warn)">-- kWh</b>
+          累计能耗(自启动起)：<b id="kwhTxt" style="color:var(--warn)">-- kWh</b>
         </div>
       </div>
     </div>
@@ -305,7 +305,7 @@ async function pollState(){
     }
     // ---- 时钟与徽章 ----
     document.getElementById('clock').textContent=s.time_str;
-    setBadge('modeSaving',s.mode.energy_saving,'节能模式','夜间停机');
+    setBadge('modeSaving',s.mode.energy_saving,'节能模式','节能关闭');
     setBadge('modeAuto',s.mode.auto,'时间表自动','手动模式');
     const sb=document.getElementById('stateBadge');
     sb.textContent=s.state_cn;

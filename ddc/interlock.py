@@ -11,6 +11,8 @@ ddc/interlock.py —— 风机链路联锁状态机（独立模块）
   停止顺序：退水泵/关水阀 → 延时 → 停风机 → 延时 → 关新风阀
   安全联锁：防火阀关闭(DI1=0)任何状态下立即停一切设备并锁定，
             恢复前禁止重启（火灾工况不允许反复开机送风）。
+  运行保护：RUNNING 期间每拍监视风机故障反馈(DI3)，运行中跳闸同样
+            立即紧急停机并退出冷冻水（盘管无风工况下不得继续供冷）。
 
 本模块只回答一个问题：step() 之后是否允许冷冻水阀输出冷量(cooling_allowed)。
 """
@@ -101,9 +103,22 @@ class FanInterlock:
                 self.state = FanInterlock.ST_RUNNING
                 self._state_timer = 0
                 self.startup_count += 1
+                self._alarms.clear("fan_fault")   # 启动确认通过，复位风机故障(允许下次再报)
         elif self.state == FanInterlock.ST_RUNNING:
             self._write_fan_outputs(True, True, True, 50.0)
-            if not run_request:
+            if not self.bus.read_bool("DI3"):
+                # 运行中风机电脱离扣/过载跳闸：无风工况下继续供冷会使盘管
+                # 失去换热风量（冷量送不出、凝露风险），必须立即退出冷冻水。
+                # 风机已跳停，反序吹扫无从执行 → 与防火阀联锁同为紧急停机
+                # 路径（不经中间态、零延时）；但不锁定，故障消失后允许
+                # 时间表重新走启动序列。
+                self.state = FanInterlock.ST_STOPPED
+                self._state_timer = 0
+                self._write_fan_outputs(False, False, False, 0.0)
+                self._alarms.trigger(now, "fan_fault",
+                                     "重要", "DI3",
+                                     "送风机运行中故障反馈丢失，紧急停机并退出冷冻水泵")
+            elif not run_request:
                 self.state = FanInterlock.ST_STOPPING   # 进入反序停机
                 self._state_timer = 0
         elif self.state == FanInterlock.ST_STOPPING:

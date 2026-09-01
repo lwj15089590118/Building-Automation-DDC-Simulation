@@ -23,7 +23,7 @@ plant/thermal.py —— 房间 RC 热网络模型（受控对象·核心之一�
     T(k+1) = T(k) + (dt/C) · [ ΣQ ]
 
 【负荷来源】
-  1) 室外温度日曲线：正弦基线(谷值约凌晨5点、峰值约14点) + 缓变随机扰动；
+  1) 室外温度日曲线：正弦基线(谷值约凌晨02:00、峰值约14:00) + 缓变随机扰动；
   2) 人员热负荷：按作息时间表(上班/会议/午休)给出人数 → 显热 120W/人；
   3) 设备热负荷：电脑、投影、大堂显示设备等，按时间表启停；
   4) 日照得热：钟形太阳辐射曲线 × 云量系数 × 窗墙面积；
@@ -90,7 +90,7 @@ class OutdoorWeather:
     室外气象模型（每天自动生成新的随机种子扰动）。
 
     - 温度日曲线：T_out(t) = T_base + A·sin(2π(t−t_peak+6h)/24h)
-      相位选取使谷值约 05:00、峰值约 14:00；
+      相位选取使谷值约 02:00、峰值约 14:00；
       再叠加一阶惯性平滑的随机游走(幅度±0.8℃)，模拟天气波动。
     - 云量系数 cloud∈[0.75,1.10]：每天抽取一次，全天不变，影响日照得热。
     """
@@ -104,7 +104,15 @@ class OutdoorWeather:
         self._last_min = -1                     # 上次更新时刻(防重复推进)
 
     def _advance_walk(self, minute: int, dt_min: float) -> None:
-        """随机游走：每小时有概率发生小幅突变，用一阶惯性平滑。"""
+        """随机游走：每小时有概率发生小幅突变，用一阶惯性平滑。
+
+        去重基准必须跨天单调：minute_of_day 每天回绕到 0，若直接与上次
+        时刻比较，第 2 天起所有分钟都满足 minute <= _last_min 而被提前
+        return，随机游走从此永久冻结。故检测到回绕时把基准同步回绕
+        (_last_min−=1440)，保证"同一分钟不重复推进、跨天正常推进"。
+        """
+        if minute < self._last_min:          # 当天分钟回绕 → 基准同步回绕
+            self._last_min -= 1440
         if minute <= self._last_min:
             return
         self._last_min = minute
@@ -116,7 +124,8 @@ class OutdoorWeather:
         """室外温度 ℃，minute_of_day 为当天第几分钟（可为小数）。"""
         self._advance_walk(int(minute_of_day), dt_min)
         hour = minute_of_day / 60.0
-        # 正弦相位：t=14 时取最大值 → (hour-14)/24*2π = π/2 → 平移 8 小时
+        # 正弦相位：t=14 时取最大值（相应谷值在 t=02:00）
+        # → (hour-14)/24*2π = π/2 → 平移 8 小时
         base = self.t_base + self.t_amp * math.sin(2.0 * math.pi * (hour - 8.0) / 24.0)
         return base + self._walk
 

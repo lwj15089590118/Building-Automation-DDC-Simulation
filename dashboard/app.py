@@ -145,7 +145,7 @@ class SimulationEngine(threading.Thread):
 
 app = Flask(__name__)
 engine = SimulationEngine()
-slave = ModbusSlaveServer(engine.bus, host="0.0.0.0", port=5020)
+slave = ModbusSlaveServer(engine.bus, port=5020)   # 默认绑定 127.0.0.1(可传参覆盖)
 
 
 def _load_strategy_data() -> dict | None:
@@ -254,7 +254,10 @@ def api_sp():
     请求体: {"room": 0~2, "action": "inc"|"dec"|"auto"}
     """
     body = request.get_json(force=True, silent=True) or {}
-    room = int(body.get("room", -1))
+    try:
+        room = int(body.get("room", -1))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "msg": "room 必须是 0/1/2 的整数"}), 400
     action = str(body.get("action", ""))
     if room not in (0, 1, 2):
         return jsonify({"ok": False, "msg": "房间编号必须是 0/1/2"}), 400
@@ -293,7 +296,10 @@ def api_mode():
 def api_speed():
     """设置仿真倍速。请求体: {"speed": 0|60|300|600}"""
     body = request.get_json(force=True, silent=True) or {}
-    speed = int(body.get("speed", engine.speed))
+    try:
+        speed = int(body.get("speed", engine.speed))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "msg": "speed 必须是整数"}), 400
     if speed not in (0, 60, 300, 600):
         return jsonify({"ok": False, "msg": "speed 只能是 0/60/300/600"}), 400
     engine.speed = speed
@@ -319,8 +325,13 @@ def main() -> None:
     print("=" * 70)
     print(" 楼宇 DDC 控制与能源管理仿真 —— Web 监控看板")
     print("=" * 70)
-    slave.start()                       # 启动 Modbus/TCP 从站(端口 5020)
-    print(f"[OK] Modbus/TCP 从站已启动: tcp://127.0.0.1:{slave.port} (Slave ID=1)")
+    try:
+        slave.start()                   # 启动 Modbus/TCP 从站(端口 5020)
+        print(f"[OK] Modbus/TCP 从站已启动: tcp://127.0.0.1:{slave.port} (Slave ID=1)")
+    except RuntimeError as exc:
+        # 从站启动失败(如端口被占用)不再静默：显式提示且不影响看板本体
+        print(f"[警告] Modbus/TCP 从站未启动: {exc}")
+        print("       (Web 看板功能不受影响，Modbus 联调请先释放端口后重启)")
     engine.start()                      # 启动后台仿真线程
     print("[OK] 仿真引擎已启动: 初始 第1天 06:00, 默认 300 倍速")
     print("[OK] 请用浏览器打开: http://127.0.0.1:5000")
