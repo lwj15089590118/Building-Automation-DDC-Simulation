@@ -44,6 +44,9 @@ class DDCController:
       setback_sp            夜间节能设定温度 ℃
       deadband              温控死区半宽 ℃（±1℃）
       tank_low/tank_high    水箱位式控制启停液位 m（回差 = high − low）
+      night_cool_high/hyst  夜间保护制冷启动阈值/停止滞环 ℃
+      min_run/min_off_time  保护制冷最小运行/停机时间 min（机组防频繁启停）
+      high_temp_limit       高温报警阈值 ℃（分层：高于保护制冷触发值，防夜间误报）
     """
 
     # ---------- 联锁状态常量(委托给 FanInterlock，保持旧引用兼容) ----------
@@ -71,9 +74,12 @@ class DDCController:
                  damper_delay: int = 2,
                  fan_delay: int = 1,
                  stop_delay: int = 1,
-                 high_temp_limit: float = 28.0,     # 高温报警阈值 ℃
+                 high_temp_limit: float = 30.0,     # 高温报警阈值 ℃（分层：setback 28 < 保护制冷 29.5 < 报警 30）
                  low_temp_limit: float = 20.0,      # 低温报警阈值 ℃
                  night_cool_high: float = 29.5,     # 夜间节能模式下触发保护制冷的室温 ℃
+                 night_cool_hyst: float = 1.0,      # 保护制冷停止滞环 ℃（PV < night_cool_high−hyst 才停止）
+                 min_run_time: int = 10,            # 机组最小运行时间 min（保护制冷防短周期启停）
+                 min_off_time: int = 15,            # 机组最小停机时间 min（保护制冷防频繁重启）
                  alarm_hyst: float = 1.0):          # 报警恢复回差 ℃
         self.bus = bus
         # ---------------- 时间表 / 模式参数 ----------------
@@ -108,10 +114,20 @@ class DDCController:
         self.sensor_hold = [False, False, False]       # 传感器故障期间保持输出标志
         self._high_timer = [0, 0, 0]                   # 各房间高温持续时间计数
         # ---------------- 报警阈值 ----------------
+        # 高温报警限与控制目标分层：setback SP 28℃ < 保护制冷触发 29.5℃ < 报警 30℃，
+        # 保护制冷控制带(28.5~29.5℃)整体落在报警限以下，避免"控制目标即报警"的
+        # 夜间误报（旧版报警限 28℃ 与 setback SP 同值，热夜工况一晚误报 3 条）。
         self.high_temp_limit = high_temp_limit
         self.low_temp_limit = low_temp_limit
         self.night_cool_high = night_cool_high
         self.alarm_hyst = alarm_hyst
+        # ---------------- 夜间保护制冷滞环 + 机组最小启/停时间 ----------------
+        self.night_cool_hyst = night_cool_hyst
+        self.min_run_time = min_run_time
+        self.min_off_time = min_off_time
+        self._night_cool_active = False          # 保护制冷请求锁存(滞环状态)
+        self._night_cool_started_at = -1         # 本次保护制冷启动的绝对分钟
+        self._night_cool_stopped_at = -10 ** 9   # 上次保护制冷停止的绝对分钟
 
     # ==================================================
     # 对外只读访问器（组合子模块的状态与统计）
@@ -143,11 +159,54 @@ class DDCController:
     # ==================================================
     # ② 时间表运算
     # ==================================================
-    def _schedule(self, bus_energy_saving: bool, mod: int):
+    def _night_cool_request(self, now: SimTime) -> bool:
+        """
+        夜间保护制冷请求裁决：启停滞环 + 机组最小运行/停机时间(min on/off timer)。
+
+        【为什么需要】夜间停机节能模式下，若逐拍用瞬时 PV>night_cool_high 判定
+        启停，σ=0.15℃ 的测量噪声会让机组在阈值附近反复启停（热夜工况实测一夜
+        风机启动 20+ 次），接触器/皮带因频繁启动过热损耗。机组级最小启/停时间
+        是 DDC 行业标配（冷机类一般 10~30 分钟量级），与水箱回差同理。
+
+        裁决规则：
+          启动：任一房间 PV > night_cool_high(29.5℃)
+                且距上次保护制冷停止 ≥ min_off_time(15min)；
+          停止：全部房间 PV < night_cool_high − night_cool_hyst(28.5℃)
+                且本次运行已持续 ≥ min_run_time(10min)；
+          中间：保持原请求（滞环带内不撤请求，噪声不引起启停翻转）。
+          全部房间传感器故障(NaN)时按"无过热"处理 → 请求撤销，保持停机节能。
+
+        【优先级约定】安全联锁 > 计划启停 > 保护制冷最小启停时间裁决：
+          本裁决只约束"夜间保护制冷"这一条非计划启停路径；时间表计划启停
+          (in_work_window)、节能关 24h 运行、上位机手动请求均不经过本裁决，
+          因此最小停机时间绝不会阻止计划性启停；防火阀联锁在联锁状态机中
+          具有最高优先级，任何时刻都能立即停机。
+        """
+        pvs = [self.bus.read(a) for a in self.ROOM_AI]
+        valid = [pv for pv in pvs if not math.isnan(pv)]
+        stop_th = self.night_cool_high - self.night_cool_hyst
+        if self._night_cool_active:
+            over = any(pv > stop_th for pv in valid)
+            ran_long_enough = (now.abs_minute - self._night_cool_started_at
+                               >= self.min_run_time)
+            if not over and ran_long_enough:
+                self._night_cool_active = False
+                self._night_cool_stopped_at = now.abs_minute
+        else:
+            over = any(pv > self.night_cool_high for pv in valid)
+            off_long_enough = (now.abs_minute - self._night_cool_stopped_at
+                               >= self.min_off_time)
+            if over and off_long_enough:
+                self._night_cool_active = True
+                self._night_cool_started_at = now.abs_minute
+        return self._night_cool_active
+
+    def _schedule(self, bus_energy_saving: bool, now: SimTime):
         """
         根据时间表和模式决定：系统是否应运行(system_enable)、各房间 SP。
         返回 (system_enable, sp_list)
         """
+        mod = now.minute
         saving = self.energy_saving_override and bus_energy_saving
         in_work_window = self.work_start <= mod < self.sys_stop      # 系统运行窗口
         in_comfort = self.comfort_start <= mod < self.comfort_end    # 工作时间
@@ -163,14 +222,16 @@ class DDCController:
         sp_list = [sp, sp, sp]
 
         # ---- 系统使能判断 ----
+        # 保护制冷请求每拍裁决一次（滞环+最小启/停时间，见 _night_cool_request）。
+        # 优先级：计划启停(in_work_window)/节能关/手动请求直接旁路裁决，
+        # 只有"夜间节能停机下的保护制冷重启"才受最小启/停时间约束。
+        night_cool_req = self._night_cool_request(now)
         enable = False
         if in_work_window:
             enable = True
         elif saving:
-            # 夜间停机节能；但若某房间过热(PV>night_cool_high)则投入保护制冷
-            pvs = [self.bus.read(a) for a in self.ROOM_AI]
-            over = any((not math.isnan(pv)) and pv > self.night_cool_high for pv in pvs)
-            if over:
+            # 夜间停机节能；保护制冷请求有效(滞环锁存)则投入(SP=setback)
+            if night_cool_req:
                 enable = True
                 sp_list = [self.setback_sp] * 3
         else:
@@ -181,7 +242,7 @@ class DDCController:
             if self.bus.is_sp_manual(i):
                 sp_list[i] = self.bus.get_manual_sp(i)
 
-        # ---- DI2 手/自动：手动模式下由 HR21 的远程请求决定系统启停 ----
+        # ---- 手/自动模式：手动模式下由上位机系统使能请求(HR 0x0015)决定启停 ----
         if self.bus.auto_mode:
             return enable, sp_list
         return self.bus.sys_enable_req, sp_list
@@ -196,7 +257,14 @@ class DDCController:
         死区逻辑(±deadband)：PV < SP−db → 阀全关并复位积分；
                               PV > SP+db → PID 调节；
                               两者之间   → 保持原开度（消除噪声引起的频繁动作）。
-        传感器故障：该回路输出保持故障前值(safe hold)，并产生报警。
+
+        【输出裁决优先级】安全联锁 > 传感器故障保持 > 正常调节：
+          1. cooling_allowed=False（停机/防火阀联锁/夜间停机/启停过渡态）：
+             阀无条件全关(AO=0)——安全联锁动作绝不允许被故障"输出保持"绕过，
+             系统设计说明书 4.2 承诺联锁"关水阀(AO=0)"在传感器故障期间同样成立；
+          2. 传感器故障且系统允许供冷(RUNNING)：该回路输出保持故障前值
+             (safe hold)，既不猛开也不猛关，并产生报警——输出保持仅限运行工况；
+          3. 正常：死区三段 PID 调节。
         :return: 各房间最终 AO 输出(%)
         """
         outputs = []
@@ -206,16 +274,15 @@ class DDCController:
             self.current_sp[i] = sp
             pid = self.pids[i]
 
-            # ---- 传感器故障检测（NaN 或物理超限）----
-            if math.isnan(pv) or pv < -20.0 or pv > 60.0:
+            # ---- 传感器故障检测与报警（无论是否允许供冷都必须执行）----
+            fault = math.isnan(pv) or pv < -20.0 or pv > 60.0
+            if fault and not self.sensor_hold[i]:
                 self.sensor_hold[i] = True
                 self._alarms.trigger(now, f"sensor_fault_AI{i+1}",
                                      "重要", self.ROOM_AI[i],
                                      f"{ROOM_NAMES[i]}温度传感器故障，"
                                      f"回路输出保持")
-                outputs.append(pid.output)          # 安全保持
-                continue
-            if self.sensor_hold[i]:                 # 故障恢复
+            elif not fault and self.sensor_hold[i]:    # 故障恢复
                 self.sensor_hold[i] = False
                 self._alarms.clear(f"sensor_fault_AI{i+1}")
                 pid.reset()
@@ -225,6 +292,7 @@ class DDCController:
             # 防火阀联锁停机期间的室温越限同样必须进入报警队列
             # （规格要求"高温/低温……全部进报警队列"），故此段必须在
             # cooling_allowed 判定之前执行。
+            # （PV=NaN 时上下两个比较恒为 False，计时器保持原值：不误报也不误清）
             key_hi = f"high_temp_room{i}"
             if pv > self.high_temp_limit:
                 self._high_timer[i] += 1
@@ -246,12 +314,18 @@ class DDCController:
             elif pv > self.low_temp_limit + self.alarm_hyst:
                 self._alarms.clear(key_lo)
 
+            # ---- 输出裁决（优先级见方法 docstring：安全联锁 > 故障保持 > 调节）----
             if not cooling_allowed:
                 # 系统未投入(停机/联锁中)：阀全关，复位回路。
+                # 此判定必须先于故障保持执行——防火阀联锁/停机期间即使该回路
+                # 传感器故障，也必须执行"阀全关"，不得保持故障前开度。
                 # 只跳过调节，不跳过上面的报警监控。
                 pid.reset()
                 pid.output = 0.0
                 outputs.append(0.0)
+                continue
+            if fault:
+                outputs.append(pid.output)          # 运行中安全保持(safe hold)
                 continue
 
             err = pv - sp                            # 制冷偏差
@@ -314,9 +388,10 @@ class DDCController:
         :param now:   当前仿真时刻(SimTime 值对象)
         :param dt_min: 扫描周期对应的仿真分钟数(保留扩展用)
         """
-        # ① 读手/自动状态(DI2)与节能模式(HR 模式字)
-        # ② 时间表 → 使能与 SP
-        run_request, sp_list = self._schedule(self.bus.energy_saving, now.minute)
+        # ① 读控制模式字（节能/手自动来自上位机 HR20 模式字，经 PointBus；
+        #    DI2 点位是模式反馈而非判定来源，见 points/point_defs.py）
+        # ② 时间表 → 使能与 SP（含夜间保护制冷滞环+最小启/停时间裁决）
+        run_request, sp_list = self._schedule(self.bus.energy_saving, now)
 
         # ③b 水箱位式控制（独立于空调系统，24h 运行）
         self._control_tank(now)

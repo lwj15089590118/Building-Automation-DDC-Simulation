@@ -70,6 +70,7 @@ class DayRunResult:
         self.alarm_count = 0                  # 报警发生总次数
         self.interlock_count = 0              # 联锁动作次数
         self.startup_count = 0                # 机组完整启动次数
+        self.valve_toggle_count = 0           # 水箱进水阀(DO4)全天动作次数(开+关)
         # ---- 舒适性统计（工作时间 08:00-18:00，共 600 分钟）----
         self.comfort_ok = [0, 0, 0]           # 各房间舒适分钟数
         self.comfort_total = 0                # 考核总分钟数
@@ -130,6 +131,10 @@ def run_one_day(energy_saving: bool, seed: int = 2024) -> DayRunResult:
     result.interlock_count = ddc.interlock_count
     result.startup_count = ddc.startup_count
     result.alarm_events = ddc.recent_alarms()   # 全量导出(新在前)
+    # 水箱进水阀动作次数直接从历史序列统计相邻分钟状态翻转数(开+关)，
+    # 该指标必须实测得出而不是凭印象填写（位式控制天然存在极限环）
+    valve = result.history["tank_valve"]
+    result.valve_toggle_count = sum(abs(b - a) for a, b in zip(valve, valve[1:]))
     return result
 
 
@@ -187,7 +192,8 @@ def build_report(res_on: DayRunResult, res_off: DayRunResult,
             avg = res.temp_sum[i] / max(1, res.comfort_total)
             ap(f"| {ROOM_NAMES[i]} | {rate:.1f}% | {res.max_dev[i]:.2f} K | {avg:.2f} ℃ |")
         ap(f"| 水箱液位 | 全天 {min(res.history['tank_level']):.2f}~"
-           f"{max(res.history['tank_level']):.2f} m（回差区间内） | — | — |")
+           f"{max(res.history['tank_level']):.2f} m（回差 1.0~1.8m，"
+           f"1 分钟采样含充放惯性的瞬时越界） | — | — |")
         ap("")
     ap("## 四、报警与联锁统计（仿真验证值）")
     ap("")
@@ -196,6 +202,8 @@ def build_report(res_on: DayRunResult, res_off: DayRunResult,
     ap(f"| 报警发生次数 | {res_on.alarm_count} | {res_off.alarm_count} |")
     ap(f"| 联锁动作次数(防火阀) | {res_on.interlock_count} | {res_off.interlock_count} |")
     ap(f"| 机组完整启动次数 | {res_on.startup_count} | {res_off.startup_count} |")
+    ap(f"| 水箱进水阀动作次数(开+关) | {res_on.valve_toggle_count} | "
+       f"{res_off.valve_toggle_count} |")
     ap("")
     ap("### 报警明细（节能模式开）")
     ap("")
@@ -226,7 +234,8 @@ def build_report(res_on: DayRunResult, res_off: DayRunResult,
     ap(f"   本仿真工况下节能率约 {comparison['节能率_percent']:.1f}%。")
     ap("")
     ap("---")
-    ap("*报告由 run_day.py 自动生成，重新运行脚本数值会因随机扰动略有变化。*")
+    ap("*报告由 run_day.py 自动生成；随机种子固定(seed=2024)，"
+       "复跑结果逐位一致（完全可复现）。*")
     return "\n".join(lines)
 
 
@@ -238,12 +247,14 @@ def main() -> None:
     print("\n[1/2] 正在快进仿真：节能模式关（基准工况，全天 24℃）...")
     res_off = run_one_day(energy_saving=False)
     print(f"      完成：总能耗 {res_off.energy.total_kwh:.2f} kWh，"
-          f"报警 {res_off.alarm_count} 次，联锁 {res_off.interlock_count} 次")
+          f"报警 {res_off.alarm_count} 次，联锁 {res_off.interlock_count} 次，"
+          f"进水阀动作 {res_off.valve_toggle_count} 次")
 
     print("[2/2] 正在快进仿真：节能模式开（夜间 setback 28℃ + 夜间停机）...")
     res_on = run_one_day(energy_saving=True)
     print(f"      完成：总能耗 {res_on.energy.total_kwh:.2f} kWh，"
-          f"报警 {res_on.alarm_count} 次，联锁 {res_on.interlock_count} 次")
+          f"报警 {res_on.alarm_count} 次，联锁 {res_on.interlock_count} 次，"
+          f"进水阀动作 {res_on.valve_toggle_count} 次")
 
     comparison = compare_strategies(res_off.energy, res_on.energy)
     print(f"\n>>> 节能量 {comparison['节能量_kwh']:.2f} kWh/天，"
@@ -266,6 +277,7 @@ def main() -> None:
                 "max_dev": [round(d, 2) for d in res.max_dev],
                 "alarm_count": res.alarm_count,
                 "interlock_count": res.interlock_count,
+                "valve_toggle_count": res.valve_toggle_count,
                 "energy": {"cooling": round(res.energy.cooling_kwh, 2),
                            "fan": round(res.energy.fan_kwh, 2),
                            "pump": round(res.energy.pump_kwh, 2),
