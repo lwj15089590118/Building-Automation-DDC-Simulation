@@ -114,6 +114,11 @@ class PointBus:
         with self._lock:
             self._energy_saving = bool(bits & 0x01)
             self._auto_mode = bool(bits & 0x02)
+            # 模式反馈点同步：DI2 是模式字的"视图"，随 bit1 实时刷新(1=自动/0=手动)，
+            # 保证看板与 Modbus 主站读到的反馈与实际模式一致（点表见 point_defs.py）。
+            # 控制判定一律走 auto_mode 属性、不读 DI2，故此同步只改反馈侧、
+            # 不影响任何控制行为（与 plant 只写 DI4、DI 区对外只读的分工一致）。
+            self._eng["DI2"] = 1.0 if self._auto_mode else 0.0
 
     def get_mode_bits(self) -> int:
         with self._lock:
