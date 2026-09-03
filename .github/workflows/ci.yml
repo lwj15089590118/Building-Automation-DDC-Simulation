@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Syntax check (compileall)
+        run: python -m compileall -q plant points ddc energy dashboard run_day.py
+
+      - name: Module self-checks (plant.thermal / plant.water_tank / ddc.ddc_controller / energy.analyzer)
+        run: |
+          python -m plant.thermal
+          python -m plant.water_tank
+          python -m ddc.ddc_controller
+          python -m energy.analyzer
+
+      - name: Full-day simulation (standard scenario, seed=2024, assert exit 0)
+        run: python run_day.py
