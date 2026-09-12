@@ -1,6 +1,6 @@
 # 楼宇 DDC 控制与能源管理仿真
 
-[![CI](https://github.com/lwj15089590118/Building-Automation-DDC-Simulation/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lwj15089590118/Building-Automation-DDC-Simulation/actions/workflows/ci.yml)
+[![CI](https://github.com/lian-automation/Building-Automation-DDC-Simulation/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lian-automation/Building-Automation-DDC-Simulation/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 
@@ -207,6 +207,6 @@ python -m energy.analyzer      # 能耗折算数量级验证
 
 ## 9. 许可证
 
-本项目以 [MIT License](LICENSE) 发布，版权人 **lwj15089590118**（2026）。
+本项目以 [MIT License](LICENSE) 发布，版权人 **lian-automation**（2026）。
 请同时遵守第 8 节免责声明：全部指标为仿真验证值，不可作为真实工程的设计、
 验收或节能承诺依据。
